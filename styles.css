@@ -1,0 +1,559 @@
+* {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+
+body {
+  font-family: "Segoe UI", Tahoma, Geneva, Verdana, sans-serif;
+  background: linear-gradient(135deg, #0f0f23 0%, #1a1a2e 50%, #16213e 100%);
+  color: #ffffff;
+  min-height: 100vh;
+  overflow-x: hidden;
+}
+
+.container {
+  max-width: 1200px;
+  margin: 0 auto;
+  padding: 20px;
+}
+
+header {
+  text-align: center;
+  margin-bottom: 30px;
+}
+
+header h1 {
+  font-size: 3rem;
+  margin-bottom: 10px;
+  background: linear-gradient(45deg, #ff6b6b, #4ecdc4, #45b7d1, #96ceb4);
+  background-size: 400% 400%;
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
+  animation: gradientShift 3s ease-in-out infinite;
+}
+
+@keyframes gradientShift {
+  0%,
+  100% {
+    background-position: 0% 50%;
+  }
+  50% {
+    background-position: 100% 50%;
+  }
+}
+
+header p {
+  color: #b0b0b0;
+  margin-bottom: 20px;
+  font-size: 1.1rem;
+}
+
+.demo-link {
+  padding: 12px 24px;
+  border: none;
+  border-radius: 25px;
+  font-size: 1rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.3s ease;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+  color: white;
+  text-decoration: none;
+  display: inline-block;
+  margin-top: 10px;
+}
+
+.demo-link:hover {
+  background: linear-gradient(135deg, #27ae60 0%, #2ecc71 100%);
+  transform: translateY(-2px);
+  box-shadow: 0 6px 20px rgba(46, 204, 113, 0.4);
+}
+
+.demo-link:active {
+  transform: translateY(0);
+}
+
+.controls {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 20px;
+  justify-content: center;
+  align-items: center;
+  margin-bottom: 30px;
+  padding: 20px;
+  background: rgba(255, 255, 255, 0.05);
+  border-radius: 15px;
+  backdrop-filter: blur(10px);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+}
+
+.btn {
+  padding: 12px 24px;
+  border: none;
+  border-radius: 25px;
+  font-size: 1rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.3s ease;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+
+.btn.primary {
+  background: linear-gradient(45deg, #ff6b6b, #ee5a24);
+  color: white;
+  box-shadow: 0 4px 15px rgba(255, 107, 107, 0.3);
+}
+
+.btn.primary:hover {
+  background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+  transform: translateY(-2px);
+  box-shadow: 0 6px 20px rgba(102, 126, 234, 0.4);
+}
+
+.btn.screen-share {
+  background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+}
+
+.btn.fullscreen {
+  background: linear-gradient(135deg, #f093fb 0%, #f5576c 100%);
+}
+
+/* Fullscreen mode styles */
+.fullscreen-mode {
+  position: fixed !important;
+  top: 0 !important;
+  left: 0 !important;
+  width: 100vw !important;
+  height: 100vh !important;
+  z-index: 99999 !important;
+  background: #0a0a0a !important;
+  padding: 0 !important;
+  margin: 0 !important;
+  border-radius: 0 !important;
+  max-width: none !important;
+  display: flex !important;
+  flex-direction: column !important;
+  align-items: center !important;
+}
+
+.fullscreen-mode .controls,
+.fullscreen-mode .control-group,
+.fullscreen-mode .status,
+.fullscreen-mode header {
+  opacity: 0;
+  transition: opacity 0.3s ease;
+  pointer-events: none;
+  position: relative !important;
+  z-index: 100000 !important;
+  background: rgba(0, 0, 0, 0.8) !important;
+  backdrop-filter: blur(10px) !important;
+  width: 100% !important;
+  max-width: none !important;
+}
+
+.fullscreen-mode .visualizer-container {
+  width: 100vw !important;
+  height: 100vh !important;
+  padding: 0 !important;
+  margin: 0 !important;
+  position: absolute !important;
+  top: 0 !important;
+  left: 0 !important;
+  z-index: 1 !important;
+}
+
+.fullscreen-mode #visualizer {
+  width: 100vw !important;
+  height: 100vh !important;
+  border-radius: 0 !important;
+  display: block !important;
+  position: absolute !important;
+  top: 0 !important;
+  left: 0 !important;
+  z-index: 1 !important;
+}
+
+/* Ensure header and other elements expand to full width in fullscreen */
+.fullscreen-mode header {
+  width: 100vw !important;
+  max-width: none !important;
+  margin: 0 !important;
+  padding: 40px 60px !important;
+  text-align: center !important;
+}
+
+.fullscreen-mode header h1 {
+  font-size: 3rem;
+  margin-bottom: 20px;
+}
+
+.fullscreen-mode header p {
+  font-size: 1.5rem;
+  margin-bottom: 30px;
+}
+
+.fullscreen-mode .demo-link {
+  font-size: 1.1rem;
+  padding: 16px 32px;
+  margin-top: 15px;
+}
+
+.fullscreen-mode .controls {
+  width: 100vw !important;
+  max-width: none !important;
+  margin: 0 !important;
+  padding: 40px 60px !important;
+  justify-content: center !important;
+  gap: 40px !important;
+  flex-wrap: wrap !important;
+}
+
+.fullscreen-mode .control-group {
+  width: 100% !important;
+  max-width: none !important;
+  margin: 0 !important;
+  padding: 30px 60px !important;
+  justify-content: center !important;
+  gap: 40px !important;
+  flex-wrap: wrap !important;
+}
+
+.fullscreen-mode .control-group label {
+  font-size: 1.2rem !important;
+  margin-right: 15px !important;
+}
+
+.fullscreen-mode .control-group select,
+.fullscreen-mode .control-group input[type="range"] {
+  font-size: 1.1rem !important;
+  padding: 8px 15px !important;
+}
+
+.fullscreen-mode .status {
+  width: 100vw !important;
+  max-width: none !important;
+  margin: 0 !important;
+  padding: 20px 60px !important;
+  text-align: center !important;
+  font-size: 1.2rem !important;
+}
+
+/* Show UI elements on mouse movement in fullscreen */
+.fullscreen-mode.show-ui .controls,
+.fullscreen-mode.show-ui .control-group,
+.fullscreen-mode.show-ui .status,
+.fullscreen-mode.show-ui header {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+.btn.screen-share:hover {
+  background: linear-gradient(135deg, #27ae60 0%, #2ecc71 100%);
+  transform: translateY(-2px);
+  box-shadow: 0 6px 20px rgba(46, 204, 113, 0.4);
+}
+
+.btn.stop {
+  background: linear-gradient(135deg, #ee5a24 0%, #ff6b6b 100%);
+  color: white;
+  border: none;
+  padding: 12px 24px;
+  border-radius: 25px;
+  font-size: 16px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.3s ease;
+  box-shadow: 0 4px 15px rgba(238, 90, 36, 0.3);
+}
+
+.btn.stop:hover {
+  background: linear-gradient(135deg, #ee5a24 0%, #ff6b6b 100%);
+  transform: translateY(-2px);
+  box-shadow: 0 6px 20px rgba(255, 107, 107, 0.4);
+}
+
+.visualization-controls,
+.audio-controls {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.control-group {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.control-group label {
+  font-weight: 600;
+  color: #b8b8b8;
+}
+
+select,
+input[type="range"] {
+  background: rgba(255, 255, 255, 0.1);
+  border: 1px solid rgba(255, 255, 255, 0.2);
+  border-radius: 8px;
+  padding: 8px 12px;
+  color: white;
+  font-size: 0.9rem;
+}
+
+select option {
+  background: #1a1a2e;
+  color: white;
+}
+
+input[type="range"] {
+  width: 100px;
+  height: 6px;
+  -webkit-appearance: none;
+  appearance: none;
+  background: rgba(255, 255, 255, 0.1);
+  border-radius: 3px;
+  outline: none;
+}
+
+input[type="range"]::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 20px;
+  height: 20px;
+  background: linear-gradient(45deg, #ff6b6b, #ee5a24);
+  border-radius: 50%;
+  cursor: pointer;
+  box-shadow: 0 2px 6px rgba(0, 0, 0, 0.3);
+}
+
+.visualizer-container {
+  text-align: center;
+  margin-bottom: 30px;
+  transition: all 0.3s ease;
+}
+
+#visualizer {
+  border-radius: 15px;
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.5);
+  background: rgba(0, 0, 0, 0.3);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  max-width: 100%;
+  height: auto;
+  transition: all 0.3s ease;
+}
+
+.audio-info {
+  display: flex;
+  justify-content: center;
+  gap: 40px;
+  margin-top: 20px;
+  font-size: 1.1rem;
+  color: #b8b8b8;
+}
+
+.status {
+  text-align: center;
+  padding: 20px;
+  background: rgba(255, 255, 255, 0.05);
+  border-radius: 15px;
+  backdrop-filter: blur(10px);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+}
+
+#statusText {
+  font-size: 1.1rem;
+  color: #4ecdc4;
+  font-weight: 600;
+}
+
+/* Responsive Design */
+@media (max-width: 768px) {
+  .container {
+    padding: 10px;
+  }
+
+  header h1 {
+    font-size: 1.8rem;
+    margin-bottom: 8px;
+  }
+
+  header p {
+    font-size: 1rem;
+    margin-bottom: 15px;
+  }
+
+  .demo-link {
+    padding: 10px 20px;
+    font-size: 0.9rem;
+    margin-top: 8px;
+  }
+
+  .controls {
+    flex-direction: column;
+    gap: 12px;
+    padding: 15px;
+  }
+
+  .btn {
+    padding: 14px 20px;
+    font-size: 0.9rem;
+    min-height: 48px; /* Better touch target */
+  }
+
+  .control-group {
+    flex-direction: column;
+    gap: 12px;
+    padding: 20px 15px;
+  }
+
+  .control-group label {
+    font-size: 1rem;
+    margin-bottom: 5px;
+  }
+
+  select,
+  input[type="range"] {
+    font-size: 1rem;
+    padding: 10px;
+    min-height: 44px; /* Better touch target */
+  }
+
+  #visualizer {
+    width: 100% !important;
+    height: 60vh !important; /* Responsive height */
+    max-height: 400px;
+    border-radius: 10px;
+  }
+
+  .status {
+    padding: 15px;
+    font-size: 0.9rem;
+  }
+
+  #statusText {
+    font-size: 0.9rem;
+  }
+}
+
+/* Small mobile devices */
+@media (max-width: 480px) {
+  .container {
+    padding: 8px;
+  }
+
+  header h1 {
+    font-size: 1.5rem;
+  }
+
+  header p {
+    font-size: 0.9rem;
+  }
+
+  .demo-link {
+    padding: 8px 16px;
+    font-size: 0.8rem;
+  }
+
+  .controls {
+    gap: 10px;
+    padding: 12px;
+  }
+
+  .btn {
+    padding: 12px 18px;
+    font-size: 0.8rem;
+  }
+
+  .control-group {
+    padding: 15px 12px;
+  }
+
+  #visualizer {
+    height: 50vh !important;
+    max-height: 300px;
+  }
+}
+
+/* Touch device optimizations */
+@media (hover: none) and (pointer: coarse) {
+  .btn {
+    min-height: 48px; /* Minimum touch target size */
+  }
+
+  .btn:hover {
+    transform: none; /* Disable hover effects on touch devices */
+  }
+
+  .demo-link:hover {
+    transform: none;
+  }
+
+  select,
+  input[type="range"] {
+    min-height: 44px;
+  }
+}
+
+/* Animation for status updates */
+.status {
+  transition: all 0.3s ease;
+}
+
+.status.active {
+  background: rgba(78, 205, 196, 0.1);
+  border-color: rgba(78, 205, 196, 0.3);
+}
+
+.status.error {
+  background: rgba(255, 107, 107, 0.1);
+  border-color: rgba(255, 107, 107, 0.3);
+}
+
+.status.info {
+  background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+  color: white;
+}
+
+/* Mobile fullscreen optimizations */
+@media (max-width: 768px) {
+  .fullscreen-mode {
+    padding: 0 !important;
+  }
+
+  .fullscreen-mode header {
+    padding: 20px 15px !important;
+  }
+
+  .fullscreen-mode header h1 {
+    font-size: 2rem !important;
+  }
+
+  .fullscreen-mode header p {
+    font-size: 1.2rem !important;
+  }
+
+  .fullscreen-mode .demo-link {
+    font-size: 1rem !important;
+    padding: 12px 20px !important;
+  }
+
+  .fullscreen-mode .controls {
+    padding: 20px 15px !important;
+    gap: 15px !important;
+  }
+
+  .fullscreen-mode .control-group {
+    padding: 20px 15px !important;
+    gap: 15px !important;
+  }
+
+  .fullscreen-mode .status {
+    padding: 15px !important;
+    font-size: 1rem !important;
+  }
+}

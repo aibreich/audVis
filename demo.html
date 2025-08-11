@@ -1,0 +1,165 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Audio Visualizer Demo</title>
+    <style>
+      body {
+        font-family: Arial, sans-serif;
+        max-width: 800px;
+        margin: 0 auto;
+        padding: 20px;
+        background: #f0f0f0;
+      }
+      .demo-section {
+        background: white;
+        padding: 20px;
+        margin: 20px 0;
+        border-radius: 10px;
+        box-shadow: 0 2px 10px rgba(0, 0, 0, 0.1);
+      }
+      .demo-section h2 {
+        color: #333;
+        border-bottom: 2px solid #4ecdc4;
+        padding-bottom: 10px;
+      }
+      .demo-section p {
+        line-height: 1.6;
+        color: #666;
+      }
+      .feature-list {
+        list-style: none;
+        padding: 0;
+      }
+      .feature-list li {
+        padding: 8px 0;
+        border-bottom: 1px solid #eee;
+      }
+      .feature-list li:before {
+        content: "✨ ";
+        color: #4ecdc4;
+      }
+      .cta-button {
+        display: inline-block;
+        background: linear-gradient(45deg, #ff6b6b, #ee5a24);
+        color: white;
+        padding: 15px 30px;
+        text-decoration: none;
+        border-radius: 25px;
+        font-weight: bold;
+        margin: 20px 0;
+        transition: transform 0.3s ease;
+      }
+      .cta-button:hover {
+        transform: translateY(-2px);
+      }
+    </style>
+  </head>
+  <body>
+    <div class="demo-section">
+      <h1>🎵 Audio Visualizer Demo</h1>
+      <p>
+        Experience the power of real-time audio visualization with our
+        interactive demo!
+      </p>
+    </div>
+
+    <div class="demo-section">
+      <h2>🚀 What You Can Do</h2>
+      <ul class="feature-list">
+        <li>
+          <strong>Real-time Microphone Input:</strong> Visualize your voice,
+          music, or any sound in real-time
+        </li>
+        <li>
+          <strong>Audio File Upload:</strong> Upload MP3, WAV, or OGG files for
+          visualization
+        </li>
+        <li>🎵 Stream music from YouTube, Spotify, or Apple Music</li>
+        <li>🖥️ Share your screen to visualize any audio playing</li>
+        <li>
+          🎨 Multiple visualization types including Frequency 2x, Rain Drops,
+          Frequency Bars, Circles, and Starlight
+        </li>
+        <li>🔊 Control volume levels</li>
+        <li>🖥️ Fullscreen mode with auto-hiding UI</li>
+        <li>📱 Responsive design for all devices</li>
+        <li>
+          <strong>Multiple Visual Modes:</strong> Switch between bars, waveform,
+          circular, and particle visualizations
+        </li>
+        <li>
+          <strong>Adjustable Sensitivity:</strong> Fine-tune how responsive the
+          visualizations are to audio
+        </li>
+        <li>
+          <strong>Live Audio Metrics:</strong> See frequency and volume levels
+          in real-time
+        </li>
+      </ul>
+    </div>
+
+    <div class="demo-section">
+      <h2>🎨 Visualization Modes</h2>
+      <div
+        style="
+          display: grid;
+          grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+          gap: 20px;
+        "
+      >
+        <div>
+          <h3>📊 Frequency Bars</h3>
+          <p>
+            Classic equalizer-style bars that respond to different frequency
+            ranges
+          </p>
+        </div>
+        <div>
+          <h3>🌊 Waveform</h3>
+          <p>Real-time audio waveform with beautiful mirror effects</p>
+        </div>
+        <div>
+          <h3>⭕ Circular</h3>
+          <p>Expanding circles that pulse with the music</p>
+        </div>
+        <div>
+          <h3>✨ Particles</h3>
+          <p>Animated particles that connect based on audio intensity</p>
+        </div>
+      </div>
+    </div>
+
+    <div class="demo-section">
+      <h2>🎯 Try It Now!</h2>
+      <p>
+        Ready to experience the magic? Click the button below to open the full
+        audio visualizer!
+      </p>
+      <a href="index.html" class="cta-button">🎵 Open Audio Visualizer</a>
+    </div>
+
+    <div class="demo-section">
+      <h2>💡 Pro Tips</h2>
+      <ul class="feature-list">
+        <li>Start with the microphone for live visualization</li>
+        <li>Try different visualization modes to see which you prefer</li>
+        <li>Adjust sensitivity for different audio sources</li>
+        <li>Use headphones for the best audio experience</li>
+        <li>Experiment with different types of music and sounds</li>
+      </ul>
+    </div>
+
+    <div class="demo-section">
+      <h2>🔧 Technical Features</h2>
+      <ul class="feature-list">
+        <li>Built with modern Web Audio API</li>
+        <li>HTML5 Canvas for smooth 60fps rendering</li>
+        <li>Responsive design for all devices</li>
+        <li>No external dependencies</li>
+        <li>Cross-browser compatible</li>
+      </ul>
+    </div>
+  </body>
+</html>
