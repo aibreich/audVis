@@ -36,6 +36,8 @@ class AudioVisualizer {
     this.lastFrameTime = 0;
 
     this.init();
+    this.loadUserPreferences(); // Load saved preferences
+    this.updateButtonStates(); // Initialize button states
   }
 
   init() {
@@ -56,8 +58,12 @@ class AudioVisualizer {
     document
       .getElementById("fullscreenBtn")
       .addEventListener("click", () => this.toggleFullscreen());
+    document
+      .getElementById("resetPreferencesBtn")
+      .addEventListener("click", () => this.clearUserPreferences());
     document.getElementById("visualType").addEventListener("change", (e) => {
       this.visualType = e.target.value;
+      this.saveUserPreferences(); // Save preference
     });
     document.getElementById("sensitivity").addEventListener("input", (e) => {
       this.sensitivity = parseFloat(e.target.value);
@@ -65,6 +71,7 @@ class AudioVisualizer {
       if (sensitivityValue) {
         sensitivityValue.textContent = this.sensitivity.toFixed(1);
       }
+      this.saveUserPreferences(); // Save preference
     });
 
     // Handle window resize
@@ -146,6 +153,7 @@ class AudioVisualizer {
         "Microphone active - Speak or play music! (Audio not played back)",
         "active"
       );
+      this.updateButtonStates(); // Update button states
       this.startVisualization();
     } catch (error) {
       console.error("Error accessing microphone:", error);
@@ -168,76 +176,230 @@ class AudioVisualizer {
         (window.innerWidth <= 768 && window.innerHeight > window.innerWidth) ||
         ("ontouchstart" in window && window.innerWidth <= 768);
 
+      // Mobile detection and enhanced audio capture
       if (isMobile) {
-        // Mobile: Use enhanced microphone with better audio processing
         this.updateStatus(
-          "Mobile detected - Using enhanced audio capture...",
+          "Mobile detected - Attempting system audio capture...",
           "active"
         );
 
-        try {
-          const stream = await navigator.mediaDevices.getUserMedia({
-            audio: {
-              echoCancellation: false,
-              noiseSuppression: false,
-              autoGainControl: false,
-              sampleRate: 48000,
-              channelCount: 2,
-            },
-          });
+        // Try multiple methods to capture system audio
+        let stream = null;
+        let captureMethod = "unknown";
 
+        // Method 1: Try advanced system audio constraints
+        try {
+          this.updateStatus(
+            "Trying advanced system audio capture...",
+            "active"
+          );
+          stream = await this.tryCaptureSystemAudio();
+          if (stream) {
+            captureMethod = "advanced";
+            this.updateStatus(
+              "Advanced system audio capture successful!",
+              "active"
+            );
+          }
+        } catch (error) {
+          console.warn("Advanced system audio capture failed:", error);
+        }
+
+        // Method 2: Try alternative system audio methods if Method 1 failed
+        if (!stream) {
+          try {
+            this.updateStatus(
+              "Trying alternative system audio capture...",
+              "active"
+            );
+            stream = await this.tryAlternativeSystemAudio();
+            if (stream) {
+              captureMethod = "alternative";
+              this.updateStatus(
+                "Alternative system audio capture successful!",
+                "active"
+              );
+            }
+          } catch (error) {
+            console.warn("Alternative system audio capture failed:", error);
+          }
+        }
+
+        // Method 3: Try MediaRecorder approach if previous methods failed
+        if (!stream) {
+          try {
+            this.updateStatus(
+              "Trying MediaRecorder system audio capture...",
+              "active"
+            );
+            stream = await this.tryMediaRecorderSystemAudio();
+            if (stream) {
+              captureMethod = "mediarecorder";
+              this.updateStatus(
+                "MediaRecorder system audio capture successful!",
+                "active"
+              );
+            }
+          } catch (error) {
+            console.warn("MediaRecorder system audio capture failed:", error);
+          }
+        }
+
+        // Method 4: Try getDisplayMedia with audio if previous methods failed
+        if (!stream) {
+          try {
+            this.updateStatus(
+              "Trying display media system audio capture...",
+              "active"
+            );
+            stream = await this.tryDisplayMediaSystemAudio();
+            if (stream) {
+              captureMethod = "display";
+              this.updateStatus(
+                "Display media system audio capture successful!",
+                "active"
+              );
+            }
+          } catch (error) {
+            console.warn("Display media system audio capture failed:", error);
+          }
+        }
+
+        // Method 5: Enhanced microphone as fallback
+        if (!stream) {
+          try {
+            this.updateStatus(
+              "Trying enhanced microphone capture...",
+              "active"
+            );
+            stream = await navigator.mediaDevices.getUserMedia({
+              audio: {
+                echoCancellation: false,
+                noiseSuppression: false,
+                autoGainControl: false,
+                sampleRate: 48000,
+                channelCount: 2,
+                // Try to get the best quality microphone input
+                googEchoCancellation: false,
+                googNoiseSuppression: false,
+                googAutoGainControl: false,
+              },
+            });
+            captureMethod = "enhanced";
+            this.updateStatus(
+              "Enhanced microphone active - Place device near speakers for best results!",
+              "active"
+            );
+          } catch (error) {
+            console.warn("Enhanced microphone failed:", error);
+          }
+        }
+
+        // Method 6: Basic microphone as final fallback
+        if (!stream) {
+          try {
+            this.updateStatus("Trying basic microphone capture...", "active");
+            stream = await navigator.mediaDevices.getUserMedia({
+              audio: true,
+            });
+            captureMethod = "basic";
+            this.updateStatus(
+              "Basic microphone active - Place device near speakers for best results!",
+              "active"
+            );
+          } catch (error) {
+            console.error("All mobile audio capture methods failed:", error);
+            this.updateStatus(
+              "Mobile audio capture failed. Please check microphone permissions.",
+              "error"
+            );
+            return;
+          }
+        }
+
+        // Log the capture method used
+        console.log(
+          `Mobile audio capture completed using method: ${captureMethod}`
+        );
+
+        // Set up audio context and analyser with the captured stream
+        if (stream) {
           this.audioContext = new (window.AudioContext ||
             window.webkitAudioContext)();
           this.analyser = this.audioContext.createAnalyser();
-          this.gainNode = this.audioContext.createGain();
-
-          // Create media stream source from audio input
-          this.screenShare = this.audioContext.createMediaStreamSource(stream);
-
-          // Enhanced analyser settings for better mobile audio
-          this.analyser.fftSize = 512; // Higher resolution for mobile
-          this.analyser.smoothingTimeConstant = 0.85;
+          this.analyser.fftSize = 256;
+          this.analyser.smoothingTimeConstant = 0.8;
           this.analyser.minDecibels = -90;
           this.analyser.maxDecibels = -10;
 
-          // Initialize smoothing buffer to zeros
-          this.smoothedFrequencyData = new Float32Array(
-            this.analyser.frequencyBinCount
-          );
+          // Create gain node for volume control
+          this.gainNode = this.audioContext.createGain();
+          this.gainNode.gain.value = 0; // Mute playback
 
-          // Connect audio to analyser
-          this.screenShare.connect(this.analyser);
+          // Connect the audio stream
+          this.microphone = this.audioContext.createMediaStreamSource(stream);
+          this.microphone.connect(this.analyser);
+          this.analyser.connect(this.gainNode);
+          this.gainNode.connect(this.audioContext.destination);
 
           this.isPlaying = true;
-          this.updateStatus(
-            "Mobile audio capture active - Place device near speakers or use headphones for best results!",
-            "active"
-          );
 
-          // Add mobile mode visual indicator
+          // Update button text based on what was captured
           const screenShareBtn = document.getElementById("screenShareBtn");
           if (screenShareBtn) {
             screenShareBtn.classList.add("mobile-audio-mode");
-            screenShareBtn.textContent = "📱 Mobile Audio Active";
+            const audioSource = this.detectAudioSource(stream);
+
+            switch (audioSource) {
+              case "system":
+                screenShareBtn.textContent = "📱 System Audio Active";
+                this.updateStatus(
+                  "System audio capture successful! Place device near speakers for best results.",
+                  "active"
+                );
+                break;
+              case "alternative":
+                screenShareBtn.textContent = "📱 Alt System Audio Active";
+                this.updateStatus(
+                  "Alternative system audio capture successful! Place device near speakers for best results.",
+                  "active"
+                );
+                break;
+              case "display":
+                screenShareBtn.textContent = "📱 Display Audio Active";
+                this.updateStatus(
+                  "Display audio capture successful! Place device near speakers for best results.",
+                  "active"
+                );
+                break;
+              case "enhanced":
+                screenShareBtn.textContent = "📱 Enhanced Audio Active";
+                this.updateStatus(
+                  "Enhanced audio capture active! Place device near speakers for best results.",
+                  "active"
+                );
+                break;
+              default:
+                screenShareBtn.textContent = "📱 Basic Audio Active";
+                this.updateStatus(
+                  "Basic audio capture active! Place device near speakers for best results.",
+                  "active"
+                );
+                break;
+            }
           }
 
+          this.updateButtonStates(); // Update button states
           this.startVisualization();
 
-          // Handle stream stop
+          // Handle stream ending
           stream.getAudioTracks()[0].onended = () => {
             this.stopScreenShare();
             this.updateStatus("Mobile audio capture ended", "info");
           };
-
-          return;
-        } catch (mobileError) {
-          console.warn("Mobile audio capture failed:", mobileError);
-          this.updateStatus(
-            "Mobile audio capture failed. Please check microphone permissions.",
-            "error"
-          );
-          return;
         }
+
+        return;
       }
 
       // Desktop: Request screen share with audio
@@ -269,6 +431,7 @@ class AudioVisualizer {
         "Screen share active - Audio from your screen is being visualized!",
         "active"
       );
+      this.updateButtonStates(); // Update button states
       this.startVisualization();
 
       // Handle stream stop
@@ -522,6 +685,7 @@ class AudioVisualizer {
     this.updateStatus("Visualizer stopped. Ready to start again.", "info");
 
     // Removed frequency and volume display reset for better performance
+    this.updateButtonStates(); // Update button states
   }
 
   draw() {
@@ -1288,6 +1452,461 @@ class AudioVisualizer {
     if (statusContainer) {
       statusContainer.className = `status ${type}`;
     }
+  }
+
+  // Save user preferences to local storage
+  saveUserPreferences() {
+    try {
+      const visualType = document.getElementById("visualType").value;
+      const sensitivity = document.getElementById("sensitivity").value;
+
+      localStorage.setItem("audVis_visualType", visualType);
+      localStorage.setItem("audVis_sensitivity", sensitivity);
+
+      // Save additional preferences
+      localStorage.setItem("audVis_lastUsed", new Date().toISOString());
+
+      console.log("Preferences saved:", { visualType, sensitivity });
+
+      // Show brief visual feedback
+      this.showPreferenceFeedback("Preferences saved!", "success");
+    } catch (error) {
+      console.warn("Failed to save preferences:", error);
+      this.showPreferenceFeedback("Failed to save preferences", "error");
+    }
+  }
+
+  // Load user preferences from local storage
+  loadUserPreferences() {
+    try {
+      const savedVisualType = localStorage.getItem("audVis_visualType");
+      const savedSensitivity = localStorage.getItem("audVis_sensitivity");
+
+      if (savedVisualType) {
+        const visualTypeSelect = document.getElementById("visualType");
+        if (visualTypeSelect) {
+          visualTypeSelect.value = savedVisualType;
+          this.visualType = savedVisualType;
+          console.log("Loaded visual type:", savedVisualType);
+        }
+      }
+
+      if (savedSensitivity) {
+        const sensitivitySlider = document.getElementById("sensitivity");
+        const sensitivityValue = document.getElementById("sensitivityValue");
+
+        if (sensitivitySlider) {
+          sensitivitySlider.value = savedSensitivity;
+          this.sensitivity = parseFloat(savedSensitivity);
+          console.log("Loaded sensitivity:", savedSensitivity);
+        }
+
+        if (sensitivityValue) {
+          sensitivityValue.textContent =
+            parseFloat(savedSensitivity).toFixed(1);
+        }
+      }
+
+      // Show feedback if preferences were loaded
+      if (savedVisualType || savedSensitivity) {
+        this.showPreferenceFeedback("Preferences loaded!", "info");
+      }
+    } catch (error) {
+      console.warn("Failed to load preferences:", error);
+    }
+  }
+
+  // Clear user preferences (useful for resetting to defaults)
+  clearUserPreferences() {
+    try {
+      localStorage.removeItem("audVis_visualType");
+      localStorage.removeItem("audVis_sensitivity");
+      console.log("Preferences cleared");
+
+      // Reset to defaults
+      this.visualType = "frequency3x";
+      this.sensitivity = 1.0;
+
+      // Update UI
+      const visualTypeSelect = document.getElementById("visualType");
+      const sensitivitySlider = document.getElementById("sensitivity");
+      const sensitivityValue = document.getElementById("sensitivityValue");
+
+      if (visualTypeSelect) visualTypeSelect.value = this.visualType;
+      if (sensitivitySlider) sensitivitySlider.value = this.sensitivity;
+      if (sensitivityValue)
+        sensitivityValue.textContent = this.sensitivity.toFixed(1);
+
+      // Show feedback
+      this.showPreferenceFeedback("Preferences reset to defaults!", "info");
+    } catch (error) {
+      console.warn("Failed to clear preferences:", error);
+      this.showPreferenceFeedback("Failed to reset preferences", "error");
+    }
+  }
+
+  // Show preference feedback to user
+  showPreferenceFeedback(message, type = "info") {
+    const statusElement = document.getElementById("statusText");
+    if (statusElement) {
+      const originalText = statusElement.textContent;
+      statusElement.textContent = message;
+
+      // Restore original text after 2 seconds
+      setTimeout(() => {
+        if (statusElement.textContent === message) {
+          statusElement.textContent = originalText;
+        }
+      }, 2000);
+    }
+  }
+
+  // Export preferences as JSON (for backup/sharing)
+  exportPreferences() {
+    try {
+      const preferences = {
+        visualType: document.getElementById("visualType").value,
+        sensitivity: document.getElementById("sensitivity").value,
+        lastUsed: new Date().toISOString(),
+        version: "1.0",
+      };
+
+      const dataStr = JSON.stringify(preferences, null, 2);
+      const dataBlob = new Blob([dataStr], { type: "application/json" });
+
+      const link = document.createElement("a");
+      link.href = URL.createObjectURL(dataBlob);
+      link.download = "audVis_preferences.json";
+      link.click();
+
+      this.showPreferenceFeedback("Preferences exported!", "success");
+    } catch (error) {
+      console.warn("Failed to export preferences:", error);
+      this.showPreferenceFeedback("Failed to export preferences", "error");
+    }
+  }
+
+  // Import preferences from JSON file
+  async importPreferences(file) {
+    try {
+      const text = await file.text();
+      const preferences = JSON.parse(text);
+
+      if (
+        preferences.version &&
+        preferences.visualType &&
+        preferences.sensitivity
+      ) {
+        // Update UI with imported preferences
+        const visualTypeSelect = document.getElementById("visualType");
+        const sensitivitySlider = document.getElementById("sensitivity");
+        const sensitivityValue = document.getElementById("sensitivityValue");
+
+        if (visualTypeSelect) {
+          visualTypeSelect.value = preferences.visualType;
+          this.visualType = preferences.visualType;
+        }
+
+        if (sensitivitySlider) {
+          sensitivitySlider.value = preferences.sensitivity;
+          this.sensitivity = parseFloat(preferences.sensitivity);
+        }
+
+        if (sensitivityValue) {
+          sensitivityValue.textContent = parseFloat(
+            preferences.sensitivity
+          ).toFixed(1);
+        }
+
+        // Save to local storage
+        this.saveUserPreferences();
+
+        this.showPreferenceFeedback(
+          "Preferences imported successfully!",
+          "success"
+        );
+      } else {
+        throw new Error("Invalid preferences file format");
+      }
+    } catch (error) {
+      console.warn("Failed to import preferences:", error);
+      this.showPreferenceFeedback("Failed to import preferences", "error");
+    }
+  }
+
+  // Update button states based on visualizer status
+  updateButtonStates() {
+    const startBtn = document.getElementById("startBtn");
+    const stopBtn = document.getElementById("stopBtn");
+    const screenShareBtn = document.getElementById("screenShareBtn");
+
+    if (startBtn && stopBtn && screenShareBtn) {
+      if (this.isPlaying) {
+        // Visualizer is running
+        startBtn.disabled = true;
+        screenShareBtn.disabled = true;
+        stopBtn.disabled = false;
+
+        // Update button text to show current state
+        startBtn.textContent = "🎤 Visualizer Active";
+        stopBtn.textContent = "⏹️ Stop Visualizer";
+      } else {
+        // Visualizer is stopped
+        startBtn.disabled = false;
+        screenShareBtn.disabled = false;
+        stopBtn.disabled = true;
+
+        // Reset button text to default
+        startBtn.textContent = "🎤 Start Microphone";
+        stopBtn.textContent = "⏹️ Stop Visualizer";
+      }
+    }
+  }
+
+  // Try to capture system audio using advanced methods
+  async tryCaptureSystemAudio() {
+    try {
+      // Method 1: Try to capture with system audio constraints
+      const stream = await navigator.mediaDevices.getUserMedia({
+        audio: {
+          echoCancellation: false,
+          noiseSuppression: false,
+          autoGainControl: false,
+          sampleRate: 48000,
+          channelCount: 2,
+          // Advanced system audio capture attempts
+          googEchoCancellation: false,
+          googNoiseSuppression: false,
+          googAutoGainControl: false,
+          googHighpassFilter: false,
+          googTypingNoiseDetection: false,
+          googAudioMirroring: false,
+          processing: false,
+          latency: 0,
+          // Try to capture from system audio output
+          sourceId: "system",
+          // Additional system audio hints
+          deviceId: "system-audio",
+          groupId: "system-audio-group",
+        },
+      });
+
+      return stream;
+    } catch (error) {
+      console.warn("System audio capture failed:", error);
+      return null;
+    }
+  }
+
+  // Try alternative system audio capture methods
+  async tryAlternativeSystemAudio() {
+    try {
+      // Try different constraint combinations that might work on some devices
+      const constraints = [
+        // Samsung/Android specific
+        {
+          audio: {
+            echoCancellation: false,
+            noiseSuppression: false,
+            autoGainControl: false,
+            sampleRate: 48000,
+            channelCount: 2,
+            googEchoCancellation: false,
+            googNoiseSuppression: false,
+            googAutoGainControl: false,
+            // Samsung specific
+            samsungEchoCancellation: false,
+            samsungNoiseSuppression: false,
+          },
+        },
+        // iOS specific
+        {
+          audio: {
+            echoCancellation: false,
+            noiseSuppression: false,
+            autoGainControl: false,
+            sampleRate: 48000,
+            channelCount: 2,
+            // iOS specific
+            iosEchoCancellation: false,
+            iosNoiseSuppression: false,
+          },
+        },
+        // Generic high-quality
+        {
+          audio: {
+            echoCancellation: false,
+            noiseSuppression: false,
+            autoGainControl: false,
+            sampleRate: 96000,
+            channelCount: 2,
+            latency: 0,
+            processing: false,
+          },
+        },
+      ];
+
+      for (const constraint of constraints) {
+        try {
+          const stream = await navigator.mediaDevices.getUserMedia(constraint);
+          console.log(
+            "Alternative system audio capture successful with constraints:",
+            constraint
+          );
+          return stream;
+        } catch (error) {
+          console.warn("Alternative constraint failed:", error);
+          continue;
+        }
+      }
+
+      return null;
+    } catch (error) {
+      console.warn("All alternative system audio methods failed:", error);
+      return null;
+    }
+  }
+
+  // Try to capture system audio using MediaRecorder approach
+  async tryMediaRecorderSystemAudio() {
+    try {
+      // Method 2: Try to capture system audio using MediaRecorder
+      const stream = await navigator.mediaDevices.getUserMedia({
+        audio: {
+          echoCancellation: false,
+          noiseSuppression: false,
+          autoGainControl: false,
+          sampleRate: 48000,
+          channelCount: 2,
+          // Try to capture from system audio output
+          sourceId: "system",
+          // Additional constraints for system audio
+          googEchoCancellation: false,
+          googNoiseSuppression: false,
+          googAutoGainControl: false,
+          googHighpassFilter: false,
+          googTypingNoiseDetection: false,
+          googAudioMirroring: false,
+          processing: false,
+          latency: 0,
+        },
+      });
+
+      // Try to create a MediaRecorder to capture system audio
+      const mediaRecorder = new MediaRecorder(stream);
+      const chunks = [];
+
+      mediaRecorder.ondataavailable = (event) => {
+        chunks.push(event.data);
+      };
+
+      mediaRecorder.onstop = () => {
+        const blob = new Blob(chunks, { type: "audio/webm" });
+        const url = URL.createObjectURL(blob);
+        // Use the captured audio
+        this.processCapturedAudio(url);
+      };
+
+      return stream;
+    } catch (error) {
+      console.warn("MediaRecorder system audio capture failed:", error);
+      return null;
+    }
+  }
+
+  // Try to capture system audio using getDisplayMedia (screen sharing with audio)
+  async tryDisplayMediaSystemAudio() {
+    try {
+      // Method 3: Try to capture system audio using screen sharing with audio
+      if (navigator.mediaDevices.getDisplayMedia) {
+        const stream = await navigator.mediaDevices.getDisplayMedia({
+          audio: {
+            echoCancellation: false,
+            noiseSuppression: false,
+            autoGainControl: false,
+            sampleRate: 48000,
+            channelCount: 2,
+          },
+          video: false, // We only want audio
+        });
+
+        // Check if we got audio tracks
+        if (stream.getAudioTracks().length > 0) {
+          console.log("Display media system audio capture successful!");
+          return stream;
+        } else {
+          // No audio tracks, close the stream
+          stream.getTracks().forEach((track) => track.stop());
+          return null;
+        }
+      }
+      return null;
+    } catch (error) {
+      console.warn("Display media system audio capture failed:", error);
+      return null;
+    }
+  }
+
+  // Detect the type of audio being captured
+  detectAudioSource(stream) {
+    const audioTrack = stream.getAudioTracks()[0];
+    const trackLabel = audioTrack.label || "";
+    const trackId = audioTrack.id || "";
+
+    // Check if this appears to be system audio
+    if (
+      trackLabel.toLowerCase().includes("system") ||
+      trackLabel.toLowerCase().includes("output") ||
+      trackLabel.toLowerCase().includes("speaker") ||
+      trackId.toLowerCase().includes("system") ||
+      trackId.toLowerCase().includes("output")
+    ) {
+      return "system";
+    }
+
+    // Check if this appears to be alternative system audio
+    if (
+      trackLabel.toLowerCase().includes("alternative") ||
+      trackLabel.toLowerCase().includes("samsung") ||
+      trackLabel.toLowerCase().includes("ios") ||
+      trackLabel.toLowerCase().includes("high-quality") ||
+      trackId.toLowerCase().includes("alternative") ||
+      trackId.toLowerCase().includes("samsung") ||
+      trackId.toLowerCase().includes("ios")
+    ) {
+      return "alternative";
+    }
+
+    // Check if this appears to be display media audio
+    if (
+      trackLabel.toLowerCase().includes("display") ||
+      trackLabel.toLowerCase().includes("screen") ||
+      trackLabel.toLowerCase().includes("tab") ||
+      trackLabel.toLowerCase().includes("window") ||
+      trackId.toLowerCase().includes("display") ||
+      trackId.toLowerCase().includes("screen")
+    ) {
+      return "display";
+    }
+
+    // Check if this appears to be enhanced microphone
+    if (
+      trackLabel.toLowerCase().includes("enhanced") ||
+      trackLabel.toLowerCase().includes("high") ||
+      trackLabel.toLowerCase().includes("quality")
+    ) {
+      return "enhanced";
+    }
+
+    // Default to basic microphone
+    return "basic";
+  }
+
+  // Process captured audio from MediaRecorder
+  processCapturedAudio(audioUrl) {
+    // This method would process the captured system audio
+    // For now, we'll use it as a fallback
+    console.log("Processing captured system audio:", audioUrl);
   }
 }
 
