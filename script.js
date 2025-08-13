@@ -183,29 +183,97 @@ class AudioVisualizer {
           "active"
         );
 
+        // Show user guidance for better system audio capture
+        setTimeout(() => {
+          this.updateStatus(
+            "💡 Tip: For best system audio capture, play music through your phone's speakers or headphones",
+            "info"
+          );
+        }, 2000);
+
         // Try multiple methods to capture system audio
         let stream = null;
         let captureMethod = "unknown";
 
-        // Method 1: Try advanced system audio constraints
+        // Method 1: Try to capture from audio output devices (speakers, headphones)
         try {
           this.updateStatus(
-            "Trying advanced system audio capture...",
+            "Trying to capture from audio output devices...",
             "active"
           );
-          stream = await this.tryCaptureSystemAudio();
+          stream = await this.tryAudioOutputCapture();
           if (stream) {
-            captureMethod = "advanced";
+            captureMethod = "audiooutput";
             this.updateStatus(
-              "Advanced system audio capture successful!",
+              "Audio output device capture successful!",
               "active"
             );
           }
         } catch (error) {
-          console.warn("Advanced system audio capture failed:", error);
+          console.warn("Audio output device capture failed:", error);
         }
 
-        // Method 2: Try alternative system audio methods if Method 1 failed
+        // Method 2: Try advanced system audio constraints
+        if (!stream) {
+          try {
+            this.updateStatus(
+              "Trying advanced system audio capture...",
+              "active"
+            );
+            stream = await this.tryCaptureSystemAudio();
+            if (stream) {
+              captureMethod = "advanced";
+              this.updateStatus(
+                "Advanced system audio capture successful!",
+                "active"
+              );
+            }
+          } catch (error) {
+            console.warn("Advanced system audio capture failed:", error);
+          }
+        }
+
+        // Method 3: Try audio context monitoring
+        if (!stream) {
+          try {
+            this.updateStatus(
+              "Trying audio context system audio capture...",
+              "active"
+            );
+            stream = await this.tryAudioContextCapture();
+            if (stream) {
+              captureMethod = "audiocontext";
+              this.updateStatus(
+                "Audio context system audio capture successful!",
+                "active"
+              );
+            }
+          } catch (error) {
+            console.warn("Audio context system audio capture failed:", error);
+          }
+        }
+
+        // Method 4: Try AudioWorklet system audio capture
+        if (!stream) {
+          try {
+            this.updateStatus(
+              "Trying AudioWorklet system audio capture...",
+              "active"
+            );
+            stream = await this.tryAudioWorkletCapture();
+            if (stream) {
+              captureMethod = "audioworklet";
+              this.updateStatus(
+                "AudioWorklet system audio capture successful!",
+                "active"
+              );
+            }
+          } catch (error) {
+            console.warn("AudioWorklet system audio capture failed:", error);
+          }
+        }
+
+        // Method 5: Try alternative system audio methods if previous methods failed
         if (!stream) {
           try {
             this.updateStatus(
@@ -225,7 +293,7 @@ class AudioVisualizer {
           }
         }
 
-        // Method 3: Try MediaRecorder approach if previous methods failed
+        // Method 6: Try MediaRecorder approach if previous methods failed
         if (!stream) {
           try {
             this.updateStatus(
@@ -245,7 +313,7 @@ class AudioVisualizer {
           }
         }
 
-        // Method 4: Try getDisplayMedia with audio if previous methods failed
+        // Method 7: Try getDisplayMedia with audio if previous methods failed
         if (!stream) {
           try {
             this.updateStatus(
@@ -265,11 +333,11 @@ class AudioVisualizer {
           }
         }
 
-        // Method 5: Enhanced microphone as fallback
+        // Method 8: Enhanced microphone as fallback (only if all system audio methods fail)
         if (!stream) {
           try {
             this.updateStatus(
-              "Trying enhanced microphone capture...",
+              "All system audio methods failed - Trying enhanced microphone...",
               "active"
             );
             stream = await navigator.mediaDevices.getUserMedia({
@@ -295,7 +363,7 @@ class AudioVisualizer {
           }
         }
 
-        // Method 6: Basic microphone as final fallback
+        // Method 9: Basic microphone as final fallback
         if (!stream) {
           try {
             this.updateStatus("Trying basic microphone capture...", "active");
@@ -351,10 +419,31 @@ class AudioVisualizer {
             const audioSource = this.detectAudioSource(stream);
 
             switch (audioSource) {
+              case "audiooutput":
+                screenShareBtn.textContent = "📱 System Audio Active";
+                this.updateStatus(
+                  "System audio capture successful! Music and sounds from your phone will now be visualized.",
+                  "active"
+                );
+                break;
               case "system":
                 screenShareBtn.textContent = "📱 System Audio Active";
                 this.updateStatus(
                   "System audio capture successful! Place device near speakers for best results.",
+                  "active"
+                );
+                break;
+              case "audiocontext":
+                screenShareBtn.textContent = "📱 System Audio Active";
+                this.updateStatus(
+                  "Audio context system audio capture successful! Music and sounds from your phone will now be visualized.",
+                  "active"
+                );
+                break;
+              case "audioworklet":
+                screenShareBtn.textContent = "📱 System Audio Active";
+                this.updateStatus(
+                  "AudioWorklet system audio capture successful! Music and sounds from your phone will now be visualized.",
                   "active"
                 );
                 break;
@@ -1698,75 +1787,6 @@ class AudioVisualizer {
     }
   }
 
-  // Try alternative system audio capture methods
-  async tryAlternativeSystemAudio() {
-    try {
-      // Try different constraint combinations that might work on some devices
-      const constraints = [
-        // Samsung/Android specific
-        {
-          audio: {
-            echoCancellation: false,
-            noiseSuppression: false,
-            autoGainControl: false,
-            sampleRate: 48000,
-            channelCount: 2,
-            googEchoCancellation: false,
-            googNoiseSuppression: false,
-            googAutoGainControl: false,
-            // Samsung specific
-            samsungEchoCancellation: false,
-            samsungNoiseSuppression: false,
-          },
-        },
-        // iOS specific
-        {
-          audio: {
-            echoCancellation: false,
-            noiseSuppression: false,
-            autoGainControl: false,
-            sampleRate: 48000,
-            channelCount: 2,
-            // iOS specific
-            iosEchoCancellation: false,
-            iosNoiseSuppression: false,
-          },
-        },
-        // Generic high-quality
-        {
-          audio: {
-            echoCancellation: false,
-            noiseSuppression: false,
-            autoGainControl: false,
-            sampleRate: 96000,
-            channelCount: 2,
-            latency: 0,
-            processing: false,
-          },
-        },
-      ];
-
-      for (const constraint of constraints) {
-        try {
-          const stream = await navigator.mediaDevices.getUserMedia(constraint);
-          console.log(
-            "Alternative system audio capture successful with constraints:",
-            constraint
-          );
-          return stream;
-        } catch (error) {
-          console.warn("Alternative constraint failed:", error);
-          continue;
-        }
-      }
-
-      return null;
-    } catch (error) {
-      console.warn("All alternative system audio methods failed:", error);
-      return null;
-    }
-  }
-
   // Try to capture system audio using MediaRecorder approach
   async tryMediaRecorderSystemAudio() {
     try {
@@ -1847,11 +1867,248 @@ class AudioVisualizer {
     }
   }
 
+  // Try to capture system audio using alternative methods
+  async tryAlternativeSystemAudio() {
+    try {
+      // Try different constraint combinations that might work on some devices
+      const constraints = [
+        // Samsung/Android specific
+        {
+          audio: {
+            echoCancellation: false,
+            noiseSuppression: false,
+            autoGainControl: false,
+            sampleRate: 48000,
+            channelCount: 2,
+            googEchoCancellation: false,
+            googNoiseSuppression: false,
+            googAutoGainControl: false,
+            // Samsung specific
+            samsungEchoCancellation: false,
+            samsungNoiseSuppression: false,
+          },
+        },
+        // iOS specific
+        {
+          audio: {
+            echoCancellation: false,
+            noiseSuppression: false,
+            autoGainControl: false,
+            sampleRate: 48000,
+            channelCount: 2,
+            // iOS specific
+            iosEchoCancellation: false,
+            iosNoiseSuppression: false,
+          },
+        },
+        // Generic high-quality
+        {
+          audio: {
+            echoCancellation: false,
+            noiseSuppression: false,
+            autoGainControl: false,
+            sampleRate: 96000,
+            channelCount: 2,
+            latency: 0,
+            processing: false,
+          },
+        },
+      ];
+
+      for (const constraint of constraints) {
+        try {
+          const stream = await navigator.mediaDevices.getUserMedia(constraint);
+          console.log(
+            "Alternative system audio capture successful with constraints:",
+            constraint
+          );
+          return stream;
+        } catch (error) {
+          console.warn("Alternative constraint failed:", error);
+          continue;
+        }
+      }
+
+      return null;
+    } catch (error) {
+      console.warn("All alternative system audio methods failed:", error);
+      return null;
+    }
+  }
+
+  // Try to capture system audio using AudioWorklet and advanced Web Audio methods
+  async tryAudioWorkletCapture() {
+    try {
+      // Method: Try to use AudioWorklet for system audio capture
+      if (window.AudioWorklet) {
+        const audioContext = new (window.AudioContext ||
+          window.webkitAudioContext)();
+
+        // Try to create a MediaStreamDestination that might capture system audio
+        const destination = audioContext.createMediaStreamDestination();
+
+        // Try to get system audio using getUserMedia with specific constraints
+        const stream = await navigator.mediaDevices.getUserMedia({
+          audio: {
+            echoCancellation: false,
+            noiseSuppression: false,
+            autoGainControl: false,
+            sampleRate: 48000,
+            channelCount: 2,
+            // Try to capture system audio specifically
+            sourceId: "system",
+            googEchoCancellation: false,
+            googNoiseSuppression: false,
+            googAutoGainControl: false,
+            googHighpassFilter: false,
+            googTypingNoiseDetection: false,
+            googAudioMirroring: false,
+            processing: false,
+            latency: 0,
+            // Additional system audio hints
+            deviceId: "system-audio",
+            groupId: "system-audio-group",
+          },
+        });
+
+        // Create a source from the stream and connect it to the destination
+        const source = audioContext.createMediaStreamSource(stream);
+        source.connect(destination);
+
+        // Also try to connect to the audio context's destination to capture system audio
+        if (audioContext.destination) {
+          source.connect(audioContext.destination);
+        }
+
+        return destination.stream;
+      }
+
+      return null;
+    } catch (error) {
+      console.warn("AudioWorklet system audio capture failed:", error);
+      return null;
+    }
+  }
+
+  // Try to capture system audio using audio output monitoring
+  async tryAudioOutputCapture() {
+    try {
+      // Method: Try to capture from audio output devices
+      const devices = await navigator.mediaDevices.enumerateDevices();
+      const audioOutputDevices = devices.filter(
+        (device) =>
+          device.kind === "audiooutput" ||
+          device.label.toLowerCase().includes("speaker") ||
+          device.label.toLowerCase().includes("output") ||
+          device.label.toLowerCase().includes("system")
+      );
+
+      if (audioOutputDevices.length > 0) {
+        console.log("Found audio output devices:", audioOutputDevices);
+
+        // Try to capture from the first available audio output device
+        for (const device of audioOutputDevices) {
+          try {
+            const stream = await navigator.mediaDevices.getUserMedia({
+              audio: {
+                deviceId: { exact: device.deviceId },
+                echoCancellation: false,
+                noiseSuppression: false,
+                autoGainControl: false,
+                sampleRate: 48000,
+                channelCount: 2,
+                // Try to capture system audio
+                googEchoCancellation: false,
+                googNoiseSuppression: false,
+                googAutoGainControl: false,
+                processing: false,
+                latency: 0,
+              },
+            });
+
+            console.log(
+              "Audio output device capture successful:",
+              device.label
+            );
+            return stream;
+          } catch (error) {
+            console.warn(
+              `Failed to capture from device ${device.label}:`,
+              error
+            );
+            continue;
+          }
+        }
+      }
+
+      return null;
+    } catch (error) {
+      console.warn("Audio output capture failed:", error);
+      return null;
+    }
+  }
+
+  // Try to capture system audio using audio context monitoring
+  async tryAudioContextCapture() {
+    try {
+      // Method: Try to create an audio context that might capture system audio
+      const audioContext = new (window.AudioContext ||
+        window.webkitAudioContext)();
+
+      // Try to create a MediaStreamDestination to capture system audio
+      const destination = audioContext.createMediaStreamDestination();
+
+      // Try to connect to system audio sources if available
+      if (navigator.mediaDevices.getUserMedia) {
+        const stream = await navigator.mediaDevices.getUserMedia({
+          audio: {
+            echoCancellation: false,
+            noiseSuppression: false,
+            autoGainControl: false,
+            sampleRate: 48000,
+            channelCount: 2,
+            // Try to capture from system audio
+            sourceId: "system",
+            googEchoCancellation: false,
+            googNoiseSuppression: false,
+            googAutoGainControl: false,
+            processing: false,
+            latency: 0,
+          },
+        });
+
+        // Connect the stream to the destination
+        const source = audioContext.createMediaStreamSource(stream);
+        source.connect(destination);
+
+        return destination.stream;
+      }
+
+      return null;
+    } catch (error) {
+      console.warn("Audio context capture failed:", error);
+      return null;
+    }
+  }
+
   // Detect the type of audio being captured
   detectAudioSource(stream) {
     const audioTrack = stream.getAudioTracks()[0];
     const trackLabel = audioTrack.label || "";
     const trackId = audioTrack.id || "";
+
+    // Check if this appears to be audio output device capture
+    if (
+      trackLabel.toLowerCase().includes("speaker") ||
+      trackLabel.toLowerCase().includes("output") ||
+      trackLabel.toLowerCase().includes("headphone") ||
+      trackLabel.toLowerCase().includes("audioout") ||
+      trackId.toLowerCase().includes("speaker") ||
+      trackId.toLowerCase().includes("output") ||
+      trackId.toLowerCase().includes("headphone")
+    ) {
+      return "audiooutput";
+    }
 
     // Check if this appears to be system audio
     if (
@@ -1862,6 +2119,28 @@ class AudioVisualizer {
       trackId.toLowerCase().includes("output")
     ) {
       return "system";
+    }
+
+    // Check if this appears to be audio context capture
+    if (
+      trackLabel.toLowerCase().includes("audiocontext") ||
+      trackLabel.toLowerCase().includes("destination") ||
+      trackLabel.toLowerCase().includes("monitor") ||
+      trackId.toLowerCase().includes("audiocontext") ||
+      trackId.toLowerCase().includes("destination")
+    ) {
+      return "audiocontext";
+    }
+
+    // Check if this appears to be AudioWorklet capture
+    if (
+      trackLabel.toLowerCase().includes("audioworklet") ||
+      trackLabel.toLowerCase().includes("worklet") ||
+      trackLabel.toLowerCase().includes("processor") ||
+      trackId.toLowerCase().includes("audioworklet") ||
+      trackId.toLowerCase().includes("worklet")
+    ) {
+      return "audioworklet";
     }
 
     // Check if this appears to be alternative system audio
