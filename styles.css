@@ -1022,3 +1022,30 @@ input[type="range"]::-moz-range-thumb {
     background: linear-gradient(135deg, #27ae60 0%, #2ecc71 100%);
   }
 }
+
+/* Retro Box visualizer optimizations */
+.fullscreen-mode .retro-box-canvas {
+  background: #000000 !important;
+}
+
+/* Car dashboard aesthetic enhancements */
+.retro-box-mode {
+  background: linear-gradient(135deg, #001100 0%, #003300 100%) !important;
+}
+
+/* Mobile optimizations for Retro Box */
+@media (max-width: 768px) {
+  .retro-box-canvas {
+    /* Ensure bars are properly sized on mobile */
+    --bar-width: 6px;
+    --bar-spacing: 3px;
+  }
+}
+
+@media (max-width: 480px) {
+  .retro-box-canvas {
+    /* Smaller bars on very small screens */
+    --bar-width: 4px;
+    --bar-spacing: 2px;
+  }
+}

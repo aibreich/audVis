@@ -649,6 +649,9 @@ class AudioVisualizer {
       case "starlight":
         this.drawStarlight();
         break;
+      case "retroBox":
+        this.drawRetroBox();
+        break;
     }
 
     // Removed updateAudioInfo() for better performance
@@ -1225,6 +1228,149 @@ class AudioVisualizer {
         this.ctx.fill();
       }
     }
+  }
+
+  // Xbox-style Retro Box visualizer
+  drawRetroBox() {
+    const ctx = this.ctx;
+    const width = this.canvas.width;
+    const height = this.canvas.height;
+
+    // Clear canvas with dark background
+    ctx.fillStyle = "rgba(0, 0, 0, 0.15)";
+    ctx.fillRect(0, 0, width, height);
+
+    // Get frequency data (prioritize boosted data)
+    const data =
+      this.boostedFrequencyData ||
+      this.smoothedFrequencyData ||
+      this.frequencyData;
+    if (!data || data.length === 0) return;
+
+    // Xbox-style parameters
+    const barHeight = height * 0.8;
+    const barWidth = 8;
+    const spacing = 4;
+    const centerY = height / 2;
+    const maxBars = Math.floor(width / (barWidth + spacing));
+
+    // Create wave motion effect
+    const time = Date.now() * 0.001;
+    const waveSpeed = 2;
+    const waveAmplitude = 20;
+
+    // Classic old-school car dashboard green color
+    const classicCarGreen = {
+      primary: "#39ff14", // Bright phosphor green (like old car dashboards)
+      secondary: "#32cd32", // Lime green
+      accent: "#ffffff", // White for highlights
+    };
+
+    // Use the classic car green instead of color cycling
+    const colors = classicCarGreen;
+
+    // Draw horizontal bars in Xbox style
+    for (let i = 0; i < maxBars; i++) {
+      const x = i * (barWidth + spacing);
+      const dataIndex = Math.floor((i / maxBars) * data.length);
+      const value = data[dataIndex] || 0;
+
+      // Create wave motion
+      const waveOffset = Math.sin(time * waveSpeed + i * 0.1) * waveAmplitude;
+      const barLength = (value / 255) * barHeight * 0.6 + 10; // Minimum bar length
+
+      // Xbox-style bar positioning (centered, horizontal)
+      const startY = centerY - barLength / 2 + waveOffset;
+      const endY = centerY + barLength / 2 + waveOffset;
+
+      // Create car dashboard-style gradient with classic green
+      const gradient = ctx.createLinearGradient(x, startY, x + barWidth, endY);
+      gradient.addColorStop(0, colors.primary); // Bright phosphor green
+      gradient.addColorStop(0.3, colors.secondary); // Lime green
+      gradient.addColorStop(0.7, colors.secondary); // Lime green
+      gradient.addColorStop(1, colors.primary); // Bright phosphor green again
+
+      // Draw main bar
+      ctx.fillStyle = gradient;
+      ctx.fillRect(x, startY, barWidth, barLength);
+
+      // Add car dashboard glow effect
+      ctx.shadowColor = colors.primary;
+      ctx.shadowBlur = 15;
+      ctx.fillRect(x, startY, barWidth, barLength);
+
+      // Reset shadow
+      ctx.shadowBlur = 0;
+
+      // Add highlight line (car dashboard signature)
+      ctx.fillStyle = colors.accent;
+      ctx.fillRect(x, startY, barWidth, 2);
+
+      // Add bottom accent line
+      ctx.fillStyle = colors.primary;
+      ctx.fillRect(x, endY - 2, barWidth, 2);
+
+      // Add subtle inner glow for that phosphor effect
+      ctx.fillStyle = `rgba(57, 255, 20, 0.4)`;
+      ctx.fillRect(x + 1, startY + 1, barWidth - 2, barLength - 2);
+    }
+
+    // Add car dashboard-style center line
+    ctx.strokeStyle = colors.primary;
+    ctx.lineWidth = 2;
+    ctx.setLineDash([8, 4]);
+    ctx.beginPath();
+    ctx.moveTo(0, centerY);
+    ctx.lineTo(width, centerY);
+    ctx.stroke();
+    ctx.setLineDash([]);
+
+    // Add subtle scan lines for retro car dashboard effect
+    ctx.strokeStyle = `rgba(57, 255, 20, 0.1)`;
+    ctx.lineWidth = 1;
+    for (let y = 0; y < height; y += 3) {
+      ctx.beginPath();
+      ctx.moveTo(0, y);
+      ctx.lineTo(width, y);
+      ctx.stroke();
+    }
+
+    // Add car dashboard-style corner accents (like speedometer corners)
+    const cornerSize = 25;
+    ctx.strokeStyle = colors.primary;
+    ctx.lineWidth = 2;
+
+    // Top-left corner (like speedometer)
+    ctx.beginPath();
+    ctx.moveTo(cornerSize, cornerSize);
+    ctx.lineTo(cornerSize, cornerSize + 20);
+    ctx.moveTo(cornerSize, cornerSize);
+    ctx.lineTo(cornerSize + 20, cornerSize);
+    ctx.stroke();
+
+    // Top-right corner
+    ctx.beginPath();
+    ctx.moveTo(width - cornerSize, cornerSize);
+    ctx.lineTo(width - cornerSize, cornerSize + 20);
+    ctx.moveTo(width - cornerSize, cornerSize);
+    ctx.lineTo(width - cornerSize - 20, cornerSize);
+    ctx.stroke();
+
+    // Bottom-left corner
+    ctx.beginPath();
+    ctx.moveTo(cornerSize, height - cornerSize);
+    ctx.lineTo(cornerSize, height - cornerSize - 20);
+    ctx.moveTo(cornerSize, height - cornerSize);
+    ctx.lineTo(cornerSize + 20, height - cornerSize);
+    ctx.stroke();
+
+    // Bottom-right corner
+    ctx.beginPath();
+    ctx.moveTo(width - cornerSize, height - cornerSize);
+    ctx.lineTo(width - cornerSize, height - cornerSize - 20);
+    ctx.moveTo(width - cornerSize, height - cornerSize);
+    ctx.lineTo(width - cornerSize - 20, height - cornerSize);
+    ctx.stroke();
   }
 
   // Try to capture system audio using advanced mobile techniques
