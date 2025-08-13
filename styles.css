@@ -1049,3 +1049,42 @@ input[type="range"]::-moz-range-thumb {
     --bar-spacing: 2px;
   }
 }
+
+/* Mobile fullscreen optimizations */
+@media (max-width: 768px) {
+  .fullscreen-mode {
+    padding: 0 !important;
+  }
+
+  .fullscreen-mode header {
+    padding: 20px 15px !important;
+  }
+
+  .fullscreen-mode header h1 {
+    font-size: 2rem !important;
+  }
+
+  .fullscreen-mode header p {
+    font-size: 1.2rem !important;
+  }
+
+  .fullscreen-mode .demo-link {
+    font-size: 1rem !important;
+    padding: 12px 20px !important;
+  }
+
+  .fullscreen-mode .controls {
+    padding: 20px 15px !important;
+    gap: 15px !important;
+  }
+
+  .fullscreen-mode .control-group {
+    padding: 20px 15px !important;
+    gap: 15px !important;
+  }
+
+  .fullscreen-mode .status {
+    padding: 15px !important;
+    font-size: 1rem !important;
+  }
+}
