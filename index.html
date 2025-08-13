@@ -7,6 +7,12 @@
       content="width=device-width, initial-scale=1.0, user-scalable=no, viewport-fit=cover"
     />
     <title>Audio Visualizer</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Orbitron:wght@400;500;600;700;800;900&display=swap"
+      rel="stylesheet"
+    />
     <link rel="stylesheet" href="styles.css" />
   </head>
   <body>
@@ -22,35 +28,37 @@
       <div class="controls">
         <button id="startBtn" class="btn primary">🎤 Start Microphone</button>
         <button id="screenShareBtn" class="btn screen-share">
-          🖥️ Share Screen / Mobile Audio
+          🖥️ Share Screen / System Audio
         </button>
-        <button id="stopBtn" class="btn stop">Stop Visualizer</button>
-        <button id="fullscreenBtn" class="btn fullscreen">Fullscreen</button>
+        <button id="stopBtn" class="btn stop">⏹️ Stop Visualizer</button>
+        <button id="fullscreenBtn" class="btn fullscreen">🖥️ Fullscreen</button>
 
-        <div class="control-group">
-          <label for="visualType">Visualization Type:</label>
-          <select id="visualType">
-            <option value="waveform">Waveform</option>
-            <option value="circular">Circular</option>
-            <option value="frequency2x">Frequency 2x</option>
-            <option value="frequency3x" selected>Rain Drops</option>
-            <option value="frequency4x">Frequency Bars</option>
-            <option value="circles">Circles</option>
-            <option value="starlight">Starlight</option>
-          </select>
-        </div>
+        <div class="controls-row">
+          <div class="control-group">
+            <label for="visualType">Visualization Type:</label>
+            <select id="visualType">
+              <option value="waveform">Waveform</option>
+              <option value="circular">Circular</option>
+              <option value="frequency2x">Frequency 2x</option>
+              <option value="frequency3x" selected>Rain Drops</option>
+              <option value="frequency4x">Frequency Bars</option>
+              <option value="circles">Circles</option>
+              <option value="starlight">Starlight</option>
+            </select>
+          </div>
 
-        <div class="control-group">
-          <label for="sensitivity">Sensitivity:</label>
-          <input
-            type="range"
-            id="sensitivity"
-            min="0.1"
-            max="2.0"
-            step="0.1"
-            value="1.0"
-          />
-          <span id="sensitivityValue">1.0</span>
+          <div class="control-group">
+            <label for="sensitivity">Sensitivity:</label>
+            <input
+              type="range"
+              id="sensitivity"
+              min="0.1"
+              max="2.0"
+              step="0.1"
+              value="1.0"
+            />
+            <span id="sensitivityValue">1.0</span>
+          </div>
         </div>
       </div>
 

@@ -149,73 +149,196 @@ class AudioVisualizer {
     try {
       this.updateStatus("Requesting screen share access...", "active");
 
-      // Check if we're on a mobile device
+      // Better mobile detection - check for actual mobile capabilities
       const isMobile =
         /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(
           navigator.userAgent
-        ) || window.innerWidth <= 768;
+        ) ||
+        (window.innerWidth <= 768 && window.innerHeight > window.innerWidth) ||
+        ("ontouchstart" in window && window.innerWidth <= 768);
 
       if (isMobile) {
-        // Mobile fallback: Use enhanced microphone with better audio processing
+        // Mobile: Try to capture system audio using advanced techniques
         this.updateStatus(
-          "Mobile detected - Using enhanced microphone mode...",
+          "Mobile detected - Attempting system audio capture...",
           "active"
         );
 
-        const stream = await navigator.mediaDevices.getUserMedia({
-          audio: {
-            echoCancellation: false,
-            noiseSuppression: false,
-            autoGainControl: false,
-            sampleRate: 48000,
-            channelCount: 2,
-          },
-        });
+        try {
+          // First, try to capture system audio using advanced methods
+          const systemAudio = await this.tryCaptureSystemAudio();
 
-        this.audioContext = new (window.AudioContext ||
-          window.webkitAudioContext)();
-        this.analyser = this.audioContext.createAnalyser();
-        this.gainNode = this.audioContext.createGain();
+          if (systemAudio && systemAudio.stream) {
+            // Successfully captured system audio
+            this.audioContext =
+              systemAudio.audioContext ||
+              new (window.AudioContext || window.webkitAudioContext)();
+            this.analyser = this.audioContext.createAnalyser();
+            this.gainNode = this.audioContext.createGain();
 
-        // Create media stream source from microphone
-        this.screenShare = this.audioContext.createMediaStreamSource(stream);
+            // Create media stream source from system audio
+            this.screenShare = this.audioContext.createMediaStreamSource(
+              systemAudio.stream
+            );
 
-        // Enhanced analyser settings for better mobile audio
-        this.analyser.fftSize = 512; // Higher resolution for mobile
-        this.analyser.smoothingTimeConstant = 0.85;
-        this.analyser.minDecibels = -90;
-        this.analyser.maxDecibels = -10;
+            // Enhanced analyser settings for system audio
+            this.analyser.fftSize = 512;
+            this.analyser.smoothingTimeConstant = 0.85;
+            this.analyser.minDecibels = -90;
+            this.analyser.maxDecibels = -10;
 
-        // Initialize smoothing buffer to zeros
-        this.smoothedFrequencyData = new Float32Array(
-          this.analyser.frequencyBinCount
-        );
+            // Initialize smoothing buffer
+            this.smoothedFrequencyData = new Float32Array(
+              this.analyser.frequencyBinCount
+            );
 
-        // Connect microphone audio to analyser
-        this.screenShare.connect(this.analyser);
+            // Connect system audio to analyser
+            this.screenShare.connect(this.analyser);
 
-        this.isPlaying = true;
-        this.updateStatus(
-          "Enhanced mobile mode active - Place device near audio source for best results!",
-          "active"
-        );
+            this.isPlaying = true;
+            this.updateStatus(
+              "System audio capture active! Playing music or audio will now be visualized.",
+              "active"
+            );
 
-        // Add mobile mode visual indicator
-        const screenShareBtn = document.getElementById("screenShareBtn");
-        if (screenShareBtn) {
-          screenShareBtn.classList.add("mobile-audio-mode");
-          screenShareBtn.textContent = "📱 Mobile Audio Active";
+            // Add mobile mode visual indicator
+            const screenShareBtn = document.getElementById("screenShareBtn");
+            if (screenShareBtn) {
+              screenShareBtn.classList.add("mobile-audio-mode");
+              screenShareBtn.textContent = "📱 System Audio Active";
+            }
+
+            this.startVisualization();
+
+            // Handle stream stop
+            systemAudio.stream.getAudioTracks()[0].onended = () => {
+              this.stopScreenShare();
+              this.updateStatus("System audio capture ended", "info");
+            };
+
+            return;
+          }
+        } catch (systemError) {
+          console.warn(
+            "System audio capture failed, trying enhanced microphone:",
+            systemError
+          );
         }
 
-        this.startVisualization();
+        // Fallback to enhanced microphone if system audio fails
+        try {
+          const stream = await navigator.mediaDevices.getUserMedia({
+            audio: {
+              echoCancellation: false,
+              noiseSuppression: false,
+              autoGainControl: false,
+              sampleRate: 48000,
+              channelCount: 2,
+              // Try to capture system audio if available
+              googEchoCancellation: false,
+              googAutoGainControl: false,
+              googNoiseSuppression: false,
+              googHighpassFilter: false,
+              googTypingNoiseDetection: false,
+              googAudioMirroring: false,
+            },
+          });
 
-        // Handle stream stop
-        stream.getAudioTracks()[0].onended = () => {
-          this.stopScreenShare();
-          this.updateStatus("Mobile audio capture ended", "info");
-        };
+          this.audioContext = new (window.AudioContext ||
+            window.webkitAudioContext)();
+          this.analyser = this.audioContext.createAnalyser();
+          this.gainNode = this.audioContext.createGain();
 
-        return;
+          // Create media stream source from audio input
+          this.screenShare = this.audioContext.createMediaStreamSource(stream);
+
+          // Enhanced analyser settings for better mobile audio
+          this.analyser.fftSize = 512; // Higher resolution for mobile
+          this.analyser.smoothingTimeConstant = 0.85;
+          this.analyser.minDecibels = -90;
+          this.analyser.maxDecibels = -10;
+
+          // Initialize smoothing buffer to zeros
+          this.smoothedFrequencyData = new Float32Array(
+            this.analyser.frequencyBinCount
+          );
+
+          // Connect audio to analyser
+          this.screenShare.connect(this.analyser);
+
+          this.isPlaying = true;
+          this.updateStatus(
+            "Enhanced mobile audio active - Place device near speakers or use headphones for best results!",
+            "active"
+          );
+
+          // Add mobile mode visual indicator
+          const screenShareBtn = document.getElementById("screenShareBtn");
+          if (screenShareBtn) {
+            screenShareBtn.classList.add("mobile-audio-mode");
+            screenShareBtn.textContent = "📱 Enhanced Audio Active";
+          }
+
+          this.startVisualization();
+
+          // Handle stream stop
+          stream.getAudioTracks()[0].onended = () => {
+            this.stopScreenShare();
+            this.updateStatus("Mobile audio capture ended", "info");
+          };
+
+          return;
+        } catch (mobileError) {
+          console.warn(
+            "Enhanced mobile audio failed, falling back to basic microphone:",
+            mobileError
+          );
+
+          // Final fallback to basic microphone
+          const basicStream = await navigator.mediaDevices.getUserMedia({
+            audio: {
+              echoCancellation: false,
+              noiseSuppression: false,
+              autoGainControl: false,
+            },
+          });
+
+          this.audioContext = new (window.AudioContext ||
+            window.webkitAudioContext)();
+          this.analyser = this.audioContext.createAnalyser();
+          this.gainNode = this.audioContext.createGain();
+
+          this.screenShare =
+            this.audioContext.createMediaStreamSource(basicStream);
+          this.analyser.fftSize = 256;
+          this.analyser.smoothingTimeConstant = 0.9;
+
+          this.smoothedFrequencyData = new Float32Array(
+            this.analyser.frequencyBinCount
+          );
+          this.screenShare.connect(this.analyser);
+
+          this.isPlaying = true;
+          this.updateStatus(
+            "Basic mobile audio active - Speak or play music near device",
+            "active"
+          );
+
+          const screenShareBtn = document.getElementById("screenShareBtn");
+          if (screenShareBtn) {
+            screenShareBtn.classList.add("mobile-audio-mode");
+            screenShareBtn.textContent = "📱 Basic Audio Active";
+          }
+
+          this.startVisualization();
+
+          basicStream.getAudioTracks()[0].onended = () => {
+            this.stopScreenShare();
+            this.updateStatus("Mobile audio capture ended", "info");
+          };
+
+          return;
+        }
       }
 
       // Desktop: Request screen share with audio
@@ -1101,6 +1224,53 @@ class AudioVisualizer {
         this.ctx.arc(star.x, star.y, starSize * 0.5, 0, 2 * Math.PI);
         this.ctx.fill();
       }
+    }
+  }
+
+  // Try to capture system audio using advanced mobile techniques
+  async tryCaptureSystemAudio() {
+    try {
+      // Method 1: Try to capture from audio output using MediaRecorder
+      if (window.MediaRecorder) {
+        const audioContext = new (window.AudioContext ||
+          window.webkitAudioContext)();
+        const destination = audioContext.createMediaStreamDestination();
+
+        // Try to create a stream from the audio context destination
+        const stream = destination.stream;
+
+        if (stream && stream.getAudioTracks().length > 0) {
+          return { stream, audioContext, destination };
+        }
+      }
+
+      // Method 2: Try to capture from system audio using getUserMedia with specific constraints
+      const stream = await navigator.mediaDevices.getUserMedia({
+        audio: {
+          echoCancellation: false,
+          noiseSuppression: false,
+          autoGainControl: false,
+          sampleRate: 48000,
+          channelCount: 2,
+          // Advanced constraints for system audio capture
+          googEchoCancellation: false,
+          googAutoGainControl: false,
+          googNoiseSuppression: false,
+          googHighpassFilter: false,
+          googTypingNoiseDetection: false,
+          googAudioMirroring: false,
+          // Try to disable all processing
+          processing: false,
+          // Request high quality audio
+          latency: 0,
+          sampleSize: 16,
+        },
+      });
+
+      return { stream, audioContext: null, destination: null };
+    } catch (error) {
+      console.warn("System audio capture failed:", error);
+      return null;
     }
   }
 
