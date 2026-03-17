@@ -18,20 +18,31 @@
   <body>
     <div class="container">
       <header>
-        <h1>🎵 Audio Visualizer</h1>
+        <h1>Audio Visualizer</h1>
         <p>Transform your audio into stunning visual art</p>
         <a href="demo.html" class="demo-link" target="_blank"
-          >📖 Learn How to Use</a
+          >Learn How to Use</a
         >
       </header>
 
       <div class="controls">
-        <button id="startBtn" class="btn primary">🎤 Start Microphone</button>
-        <button id="screenShareBtn" class="btn screen-share">
-          🖥️ Share Screen / System Audio
-        </button>
-        <button id="stopBtn" class="btn stop">⏹️ Stop Visualizer</button>
-        <button id="fullscreenBtn" class="btn fullscreen">🖥️ Fullscreen</button>
+        <div class="controls-actions">
+          <button id="startBtn" class="btn primary">Start Microphone</button>
+          <button id="screenShareBtn" class="btn screen-share">
+            Share Screen / System Audio
+          </button>
+          <button id="stopBtn" class="btn stop" type="button" hidden>
+            ⏸ Pause
+          </button>
+          <button
+            id="fullscreenBtn"
+            class="btn fullscreen icon-only"
+            type="button"
+            aria-label="Toggle fullscreen"
+          >
+            ⛶
+          </button>
+        </div>
 
         <div class="controls-row">
           <div class="control-group">
@@ -39,12 +50,12 @@
             <select id="visualType">
               <option value="waveform">Waveform</option>
               <option value="circular">Circular</option>
+              <option value="lissajous">Lissajous</option>
+              <option value="particleFlow">Particle Flow</option>
               <option value="frequency2x">Frequency 2x</option>
               <option value="frequency3x" selected>Rain Drops</option>
               <option value="frequency4x">Frequency Bars</option>
               <option value="circles">Circles</option>
-              <option value="starlight">Starlight</option>
-              <option value="retroBox">Retro Box</option>
             </select>
           </div>
 
@@ -62,8 +73,21 @@
           </div>
 
           <div class="control-group">
+            <label for="hueOffset">Hue:</label>
+            <input
+              type="range"
+              id="hueOffset"
+              min="0"
+              max="360"
+              step="1"
+              value="200"
+            />
+            <span id="hueOffsetValue">200</span>
+          </div>
+
+          <div class="control-group reset-group">
             <button id="resetPreferencesBtn" class="btn reset">
-              🔄 Reset Preferences
+              Reset Preferences
             </button>
           </div>
         </div>

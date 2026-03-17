@@ -1,188 +1,154 @@
-# 🎵 Audio Visualizer
+# AudVis 🎧✨
 
-A modern, reactive audio visualizer built with HTML5 Canvas and Web Audio API that creates stunning visual representations of audio in real-time.
+A lightweight, real-time audio visualizer inspired by classic Xbox‑era visuals. Built with **Web Audio API + HTML5 Canvas**, no bundler, no dependencies.
 
 ## Features
 
-- **Real-time Audio Input**: Microphone input with live visualization
-- **Audio File Upload**: Support for various audio formats (MP3, WAV, OGG, etc.)
-- **Music Streaming**: Stream directly from YouTube, Spotify, and Apple Music links
+- **Real-time audio visualization** via `AnalyserNode` (FFT \(= 256\))
+- **Audio input modes**
+  - **Microphone** (`getUserMedia`)
+  - **Screen share / system audio (desktop)** (`getDisplayMedia({ audio: true })`)
+  - **Mobile “system audio” fallback path**: multiple capture strategies with final fallback to enhanced/basic microphone capture
+- **Visualization modes**
+  - **Waveform**
+  - **Circular**
+  - **Lissajous** (oscilloscope-style curve with subtle trails)
+  - **Particle Flow** (fixed particle pool; energy-driven swirl/outflow)
+  - **Frequency 2x** (mirrored bars from bottom)
+  - **Rain Drops** (`frequency3x`, mirrored bars from top + raindrop overlay)
+  - **Frequency Bars** (`frequency4x`, 4-quadrant center-out)
+  - **Circles** (up to 64 points + trail)
+- **Controls**
+  - **Sensitivity** slider
+  - **Hue** (global palette rotation)
+  - **Fullscreen mode** with auto-hiding UI (mouse move / click shows controls)
+  - **Pause/Stop** (stops animation + tears down streams)
+  - **Reset preferences**
+- **Preferences persistence** using `localStorage` (mode, sensitivity, hue)
+- **Mobile-friendly layout** + touch optimizations
 
-- **Volume Control**: Adjustable volume slider for all audio sources
-- **Multiple Visual Modes**: Bars, waveform, circular, and particle effects
-- **Adjustable Sensitivity**: Fine-tune the visualization response
-- **Responsive Design**: Works on desktop and mobile devices
+## Demo
 
-## 🚀 Getting Started
+- **`index.html`**: the actual visualizer app (canvas + controls).
+- **`demo.html`**: a static “how to use” page. Note: it may mention features that are not currently wired into `index.html` (see **Roadmap**).
 
-### Prerequisites
+## Installation
 
-- Modern web browser with Web Audio API support
-- Microphone access (for live audio visualization)
-- Audio files (for file-based visualization)
+This is a static project. No build step.
 
-### Installation
+- **Option A (recommended)**: run a local static server (avoids browser permission quirks).
 
-1. Clone or download this repository
-2. Open `index.html` in your web browser
-3. Allow microphone permissions when prompted
-4. Start visualizing audio!
+```bash
+npx serve .
+```
 
-## 📱 Usage
+- **Option B**: open `index.html` directly in a browser (works in many browsers, but permissions can be stricter depending on browser settings).
 
-### Using Microphone
+## Usage
 
-1. Click the **"🎤 Start Microphone"** button
-2. Allow microphone access when prompted
-3. Speak, sing, or play music near your microphone
-4. Watch the real-time visualization!
+- **Start microphone**
+  - Open `index.html`
+  - Click **Start Microphone**
+  - Approve permission prompt
+- **Visualize system/screen audio (desktop)**
+  - Click **Share Screen / System Audio**
+  - Select a tab/window/screen
+  - If the picker offers it, enable **Share audio**
+- **Switch modes**
+  - Use **Visualization Type** dropdown
+- **Tune visuals**
+  - Increase **Sensitivity** for stronger response
+  - Adjust **Hue** to rotate the color palette
+- **Fullscreen**
+  - Click the fullscreen button (⛶)
+  - Move mouse / click to reveal controls; press **Esc** to exit
 
-### Using Audio Files
+## Project Structure
 
-1. Click the **"📁 Upload Audio"** button
-2. Select an audio file from your device
-3. The file will automatically start playing and visualizing
-4. Visualization stops when the audio ends
+```text
+audVis/
+├─ index.html            # Main app shell (controls + canvas)
+├─ script.js             # Audio capture, analysis, render loop, all visual modes
+├─ styles.css            # Material-inspired dark UI + fullscreen overlay behavior
+├─ demo.html             # Static usage/demo page (no app logic)
+├─ streaming-service.js  # Streaming platform detection + demo oscillator stream (currently not integrated)
+└─ README.md             # Project documentation
+```
 
-## Using Music Streaming
+## Architecture
 
-1. Click the **"🎵 Stream Music"** button
-2. Enter a URL from YouTube, Spotify, or Apple Music
-3. Click **"Start Stream"** to begin visualization
-4. The visualizer will create a demo audio stream based on the platform
-5. Enjoy the visualization for 15 seconds (demo duration)
+- **UI (HTML/CSS)**
+  - Controls in `index.html` are bound in `AudioVisualizer.setupEventListeners()`
+  - Fullscreen mode is a **CSS-driven layout** (`.fullscreen-mode`, `.show-ui`) with JS controlling visibility timing
+- **Audio input**
+  - **Mic**: `startMicrophone()` → `getUserMedia({ audio: true })` → `MediaStreamAudioSourceNode`
+  - **Desktop screen/system audio**: `startScreenShare()` → `getDisplayMedia({ video: true, audio: true })`
+  - **Mobile path**: `startScreenShare()` attempts multiple strategies; ultimately falls back to microphone capture if true system audio is not possible
+- **Processing**
+  - `AnalyserNode` feeds:
+    - `frequencyData` (`getByteFrequencyData`)
+    - `dataArray` (`getByteTimeDomainData`)
+  - `applyHighEndBoost()` builds a boosted spectrum buffer (reused per frame)
+  - `RhythmTracker` + `AdaptiveEnergyNormalizer` + `StyleEngine` derive a smooth **behavior profile** (energy bands, beat envelope, motion/detail knobs)
+- **Render loop**
+  - `startVisualization()` runs `requestAnimationFrame` with an explicit **FPS throttle** (`targetFPS = 45`)
+  - Each frame: sample analyser → update energy/rhythm/style → smooth spectrum → `draw()` dispatches to the current mode renderer
 
-### Customizing Visualization
+## Feature Inventory (audit)
 
-- **Change Visualization Type**: Use the dropdown to switch between modes
-- **Adjust Sensitivity**: Use the slider to make visualizations more or less responsive
-- **Real-time Info**: Monitor frequency and volume levels below the canvas
+- ✅ **Completed**
+  - Microphone input
+  - Desktop screen share with audio (when browser supports audio sharing)
+  - Mobile “best effort” audio capture flow + UI indicator (`mobile-audio-mode`)
+  - 8 visualization modes listed in the UI
+  - Fullscreen mode with auto-hide controls
+  - Preference save/load/reset (mode, sensitivity, hue)
+  - Performance-minded rendering (buffer reuse, fixed particle pool, mode-specific clearing/trails, FPS throttle)
 
-## 🔧 Technical Details
+- ⚠️ **In-progress / partially implemented**
+  - “System audio capture” strategies on mobile/desktop beyond `getDisplayMedia` include multiple experimental methods (constraints tricks, MediaRecorder approach, etc.). Some branches are best-effort and environment-dependent.
+  - `demo.html` content is not fully aligned with the current app UI (it mentions features that are not present in `index.html`).
 
-### Technologies Used
+- ❌ **Planned / scaffolded but not integrated**
+  - **Streaming URL support** (YouTube/Spotify/Apple Music): implemented as `streaming-service.js` (platform detection + demo oscillator stream), but **not imported/used** by `index.html`/`script.js`.
+  - **Audio file upload**: no UI control and no implementation path in `script.js` currently.
+  - **Volume control UI**: `gainNode` exists in some paths (often muted), but there is **no slider** wired in the UI.
+  - **Preferences import/export UI**: `exportPreferences()` / `importPreferences()` exist in `script.js`, but no UI elements call them.
 
-- **HTML5 Canvas**: For high-performance graphics rendering
-- **Web Audio API**: For real-time audio analysis
-- **CSS3**: For modern styling and animations
-- **Vanilla JavaScript**: No external dependencies
-- **Streaming Service**: Platform detection and URL validation for music services
+## Performance Notes
 
-### Audio Analysis
+- **Known hotspots**
+  - **Particle Flow**: per-frame loop over ~60–140 particles (default 120) is fine, but the cost scales with resolution and fill rate.
+  - **Bars + raindrops**: raindrop timers per bar + per-frame updates can add overhead on low-end devices.
+  - **Multiple global event listeners**: fullscreen handlers add listeners on enter; cleanup happens on stop.
+- **Current mitigations in code**
+  - `targetFPS = 45` throttling
+  - Typed arrays + buffer reuse (no per-frame allocations in hot paths)
+  - Hard caps (e.g., circles limited to 64, particle pool clamped)
+- **Suggested next optimizations**
+  - Dynamically lower `particleFlowCount` / visual detail on small screens or when frame time exceeds budget
+  - Consider devicePixelRatio-aware canvas scaling with a capped DPR (reduces fill-rate cost on high-DPI)
+  - Ensure fullscreen event listeners are removed on exit (currently cleaned up on `stopVisualizer()`, but not on `exitFullscreen()` alone)
 
-- **FFT Size**: 256 samples for optimal performance
-- **Smoothing**: 0.8 time constant for smooth transitions
-- **Frequency Range**: 0-22kHz (depending on sample rate)
-- **Update Rate**: 60 FPS for smooth animations
+## Roadmap
 
-### Browser Compatibility
+- **Streaming support integration**
+  - Wire `streaming-service.js` into the app and add a URL input + start/stop controls
+- **UI improvements**
+  - Tighten `demo.html` to reflect the live feature set
+  - Optional: formalize the Material-inspired dark theme (tokens already exist in `styles.css`)
+- **Performance**
+  - Adaptive quality mode (auto-tune FPS / particle count based on frame time)
+- **More visual modes**
+  - Add new `drawX()` method + dropdown option + switch case in `AudioVisualizer.draw()`
 
-- ✅ Chrome 66+
-- ✅ Firefox 60+
-- ✅ Safari 14+
-- ✅ Edge 79+
+## Contributing
 
-### Supported Streaming Platforms
+- Fork the repo
+- Create a feature branch
+- Keep changes dependency-free (vanilla HTML/CSS/JS)
+- Open a PR with a short summary and screenshots/video if visuals changed
 
-- 🎥 **YouTube**: Music videos, live streams, and audio content
-- 🎵 **Spotify**: Individual tracks, albums, and playlists
-- 🍎 **Apple Music**: Songs, albums, and curated playlists
+## License
 
-## 🎨 Visualization Modes Explained
-
-### Frequency Bars
-
-- Each bar represents a frequency band
-- Bar height corresponds to frequency intensity
-- Colors shift based on frequency values
-- Includes glow effects for enhanced visuals
-
-### Waveform
-
-- Shows real-time audio waveform
-- Includes mirror effect for symmetry
-- Smooth line rendering with anti-aliasing
-- Responsive to audio amplitude
-
-### Circular
-
-- Multiple expanding circles
-- Circle size based on frequency intensity
-- Color and opacity variations
-- Creates hypnotic ripple effects
-
-### Particles
-
-- 100 animated particles
-- Particles connect based on audio levels
-- Dynamic movement and bouncing
-- Color-coded connections
-
-## 🛠️ Customization
-
-### Adding New Visualization Modes
-
-1. Add new option to the HTML select element
-2. Implement new drawing method in the `AudioVisualizer` class
-3. Add case to the `draw()` method switch statement
-
-### Modifying Colors and Effects
-
-- Edit CSS variables for theme colors
-- Modify canvas drawing methods for visual effects
-- Adjust particle parameters in `createParticles()`
-
-### Performance Optimization
-
-- Reduce FFT size for better performance
-- Limit particle count on mobile devices
-- Use `requestAnimationFrame` for smooth animations
-
-## 🐛 Troubleshooting
-
-### Microphone Not Working
-
-- Check browser permissions
-- Ensure microphone is not used by other applications
-- Try refreshing the page
-- Check browser console for error messages
-
-### Audio File Issues
-
-- Ensure file format is supported (MP3, WAV, OGG, etc.)
-- Check file size (very large files may cause delays)
-- Verify file is not corrupted
-
-### Performance Issues
-
-- Reduce canvas size
-- Lower FFT size
-- Close other browser tabs
-- Use less complex visualization modes
-
-## 📄 License
-
-This project is open source and available under the [MIT License](LICENSE).
-
-## 🤝 Contributing
-
-Contributions are welcome! Feel free to:
-
-- Add new visualization modes
-- Improve performance
-- Enhance the UI/UX
-- Fix bugs
-- Add new features
-
-## 📞 Support
-
-If you encounter any issues or have questions:
-
-1. Check the troubleshooting section
-2. Review browser console for error messages
-3. Ensure your browser supports Web Audio API
-4. Try different audio sources
-
----
-
-**Enjoy creating beautiful audio visualizations! 🎵✨**
+**TBD.** Add a `LICENSE` file (MIT/Apache-2.0/etc.) and update this section accordingly.

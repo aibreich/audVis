@@ -1,6 +1,11 @@
 /**
  * Streaming Service for Audio Visualizer
  * Handles YouTube, Spotify, and Apple Music streaming
+ *
+ * Status (2026-03 audit):
+ * - This module is currently **experimental** and **not integrated** into `index.html` / `script.js`.
+ * - It can detect platforms and generate a synthetic demo audio stream for visualization, but it does
+ *   not fetch or play real third-party streams (API keys + platform SDKs would be required).
  */
 
 class StreamingService {

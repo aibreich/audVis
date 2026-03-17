@@ -1,3 +1,544 @@
+class RhythmTracker {
+  constructor() {
+    // Short vs long-term energy tracking (lightweight onset detection)
+    this.currentEnergy = 0;
+    this.smoothedEnergy = 0;
+    this.longTermEnergy = 0;
+    this.beatDetected = false;
+    this.bpmEstimate = 0;
+
+    // Tunables (chosen for stability on varied devices/content)
+    this.lowHzMin = 20;
+    this.lowHzMax = 150;
+    this.longTermAlpha = 0.015; // slower = steadier baseline (higher = more reactive)
+    this.shortTermAlpha = 0.18; // energy smoothing (higher = snappier)
+    this.thresholdMultiplier = 1.4; // beat when energy exceeds baseline * multiplier (tune 1.2..1.6)
+    this.minBeatIntervalMs = 260; // debounce window to avoid double-triggers (tune 200..400)
+
+    // Optional adaptive thresholding (helps reduce false positives on noisy input)
+    this._adaptive = 1.0; // multiplies thresholdMultiplier, slowly self-corrects
+    this._adaptiveMin = 0.92;
+    this._adaptiveMax = 1.18;
+
+    // BPM estimation via recent beat intervals
+    this._lastBeatTs = 0;
+    this._intervals = new Float32Array(8);
+    this._intervalWrite = 0;
+    this._intervalCount = 0;
+
+    // Edge / peak detection helpers
+    this._prevRatio = 0;
+    this._prevSmoothed = 0;
+  }
+
+  update(byteFrequencyData, sampleRate, timestampMs) {
+    this.beatDetected = false;
+    if (!byteFrequencyData || byteFrequencyData.length === 0 || !sampleRate) {
+      this.currentEnergy = 0;
+      this.smoothedEnergy *= 0.95;
+      this.longTermEnergy *= 0.995;
+      this._prevRatio *= 0.9;
+      this._prevSmoothed *= 0.9;
+      return;
+    }
+
+    // Map target low-frequency band to FFT bins
+    const binCount = byteFrequencyData.length;
+    const nyquist = sampleRate * 0.5;
+    const hzPerBin = nyquist / binCount;
+    let startBin = (this.lowHzMin / hzPerBin) | 0;
+    let endBin = (this.lowHzMax / hzPerBin) | 0;
+    if (startBin < 0) startBin = 0;
+    if (endBin > binCount - 1) endBin = binCount - 1;
+    if (endBin <= startBin) endBin = Math.min(binCount - 1, startBin + 1);
+
+    // Energy = average of squared magnitudes (normalized 0..1)
+    let sumSq = 0;
+    const denom = 255 * 255;
+    const count = endBin - startBin + 1;
+    for (let i = startBin; i <= endBin; i++) {
+      const v = byteFrequencyData[i];
+      sumSq += (v * v) / denom;
+    }
+    const energy = sumSq / count;
+    this.currentEnergy = energy;
+
+    // Smooth current energy and update long-term baseline (EMA)
+    this.smoothedEnergy += (energy - this.smoothedEnergy) * this.shortTermAlpha;
+    this.longTermEnergy +=
+      (this.smoothedEnergy - this.longTermEnergy) * this.longTermAlpha;
+
+    // Onset/beat detection (threshold + rising-edge + debounce)
+    const baseline = Math.max(1e-6, this.longTermEnergy);
+    const ratio = this.smoothedEnergy / baseline;
+    const sinceLast = timestampMs - this._lastBeatTs;
+
+    // Rising edge gating reduces random flashes on steady tones/noise
+    const rising = this.smoothedEnergy > this._prevSmoothed;
+    const ratioRising = ratio > this._prevRatio;
+    const threshold = this.thresholdMultiplier * this._adaptive;
+
+    if (
+      rising &&
+      ratioRising &&
+      ratio > threshold &&
+      sinceLast >= this.minBeatIntervalMs
+    ) {
+      this.beatDetected = true;
+      this._recordBeat(timestampMs);
+    }
+
+    this._prevRatio = ratio;
+    this._prevSmoothed = this.smoothedEnergy;
+  }
+
+  _recordBeat(timestampMs) {
+    if (this._lastBeatTs > 0) {
+      const interval = timestampMs - this._lastBeatTs;
+
+      // Adaptive thresholding:
+      // - If beats are coming "too fast", gently increase threshold to stop chatter.
+      // - If beats are sparse, gently relax threshold to stay responsive.
+      if (interval < this.minBeatIntervalMs * 1.15) {
+        this._adaptive = Math.min(this._adaptiveMax, this._adaptive + 0.03);
+      } else if (interval > 520) {
+        this._adaptive = Math.max(this._adaptiveMin, this._adaptive - 0.015);
+      } else {
+        // drift slowly back toward neutral
+        this._adaptive += (1.0 - this._adaptive) * 0.03;
+      }
+
+      // Keep plausible BPM (60..200) to avoid wild estimates
+      if (interval >= 300 && interval <= 1000) {
+        this._intervals[this._intervalWrite] = interval;
+        this._intervalWrite = (this._intervalWrite + 1) & 7; // size 8
+        if (this._intervalCount < 8) this._intervalCount++;
+
+        // Compute average interval (tiny array; no allocations)
+        let sum = 0;
+        for (let i = 0; i < this._intervalCount; i++) sum += this._intervals[i];
+        const avg = sum / this._intervalCount;
+        this.bpmEstimate = avg > 0 ? 60000 / avg : 0;
+      }
+    }
+    this._lastBeatTs = timestampMs;
+  }
+}
+
+class AdaptiveEnergyNormalizer {
+  constructor() {
+    // Band definitions (Hz). Kept wide so different genres still register.
+    this.lowHzMin = 20;
+    this.lowHzMax = 150;
+    this.midHzMin = 150;
+    this.midHzMax = 2000;
+    this.highHzMin = 2000;
+    this.highHzMax = 8000;
+
+    // Rolling min/max “envelopes” (fast attack, slow release) per band.
+    // This approximates a rolling window without storing history.
+    this.fastAttack = 0.25; // how quickly min/max snaps to new extremes
+    this.slowRelease = 0.006; // how quickly envelopes drift back (seconds-scale)
+    this.minRange = 0.02; // prevents divide-by-tiny-range explosions
+
+    // Per-band energy (raw 0..1), normalized 0..1
+    this.lowEnergy = 0;
+    this.midEnergy = 0;
+    this.highEnergy = 0;
+    this.lowNorm = 0;
+    this.midNorm = 0;
+    this.highNorm = 0;
+
+    // Envelopes
+    this._lowMin = 1;
+    this._lowMax = 0;
+    this._midMin = 1;
+    this._midMax = 0;
+    this._highMin = 1;
+    this._highMax = 0;
+
+    // Combined
+    this.combinedNorm = 0;
+    this.dominantBand = 1; // 0 low, 1 mid, 2 high
+
+    // Extra smoothing so visuals don’t jitter when ranges adapt
+    this._combinedSmoothed = 0;
+    this.combinedSmoothing = 0.08; // tune 0.04..0.12
+  }
+
+  update(byteFrequencyData, sampleRate) {
+    if (!byteFrequencyData || byteFrequencyData.length === 0 || !sampleRate) {
+      this.lowEnergy = this.midEnergy = this.highEnergy = 0;
+      this.lowNorm = this.midNorm = this.highNorm = 0;
+      this._combinedSmoothed *= 0.95;
+      this.combinedNorm = this._combinedSmoothed;
+      this.dominantBand = 1;
+      return;
+    }
+
+    const binCount = byteFrequencyData.length;
+    const nyquist = sampleRate * 0.5;
+    const hzPerBin = nyquist / binCount;
+
+    // Compute per-band energies (average squared magnitude, normalized 0..1)
+    this.lowEnergy = this._bandEnergy(
+      byteFrequencyData,
+      hzPerBin,
+      this.lowHzMin,
+      this.lowHzMax,
+    );
+    this.midEnergy = this._bandEnergy(
+      byteFrequencyData,
+      hzPerBin,
+      this.midHzMin,
+      this.midHzMax,
+    );
+    this.highEnergy = this._bandEnergy(
+      byteFrequencyData,
+      hzPerBin,
+      this.highHzMin,
+      Math.min(this.highHzMax, nyquist),
+    );
+
+    // Update envelopes and normalize each band
+    this.lowNorm = this._normalizeWithEnvelope(
+      this.lowEnergy,
+      "_lowMin",
+      "_lowMax",
+    );
+    this.midNorm = this._normalizeWithEnvelope(
+      this.midEnergy,
+      "_midMin",
+      "_midMax",
+    );
+    this.highNorm = this._normalizeWithEnvelope(
+      this.highEnergy,
+      "_highMin",
+      "_highMax",
+    );
+
+    // Dominant band (for optional future behavior variance)
+    if (this.lowNorm >= this.midNorm && this.lowNorm >= this.highNorm)
+      this.dominantBand = 0;
+    else if (this.highNorm >= this.midNorm && this.highNorm >= this.lowNorm)
+      this.dominantBand = 2;
+    else this.dominantBand = 1;
+
+    // Balanced blend: ensures non-bass tracks still animate
+    // (Weights chosen to feel “musical” but not bass-only)
+    const combined =
+      this.lowNorm * 0.45 + this.midNorm * 0.35 + this.highNorm * 0.2;
+
+    // Smooth combined to avoid small range-adaptation jitter
+    this._combinedSmoothed +=
+      (combined - this._combinedSmoothed) * this.combinedSmoothing;
+    this.combinedNorm = this._combinedSmoothed;
+  }
+
+  _bandEnergy(byteFrequencyData, hzPerBin, hzMin, hzMax) {
+    let startBin = (hzMin / hzPerBin) | 0;
+    let endBin = (hzMax / hzPerBin) | 0;
+    const last = byteFrequencyData.length - 1;
+    if (startBin < 0) startBin = 0;
+    if (endBin > last) endBin = last;
+    if (endBin <= startBin) endBin = Math.min(last, startBin + 1);
+
+    let sumSq = 0;
+    const denom = 255 * 255;
+    const count = endBin - startBin + 1;
+    for (let i = startBin; i <= endBin; i++) {
+      const v = byteFrequencyData[i];
+      sumSq += (v * v) / denom;
+    }
+    return sumSq / count;
+  }
+
+  _normalizeWithEnvelope(x, minKey, maxKey) {
+    // Update rolling min/max envelopes with fast-attack / slow-release behavior
+    let min = this[minKey];
+    let max = this[maxKey];
+
+    // Min envelope
+    if (x < min) min += (x - min) * this.fastAttack;
+    else min += (x - min) * this.slowRelease;
+
+    // Max envelope
+    if (x > max) max += (x - max) * this.fastAttack;
+    else max += (x - max) * this.slowRelease;
+
+    this[minKey] = min;
+    this[maxKey] = max;
+
+    const range = Math.max(this.minRange, max - min);
+    let n = (x - min) / range;
+    if (n < 0) n = 0;
+    else if (n > 1) n = 1;
+    return n;
+  }
+}
+
+class StyleEngine {
+  constructor() {
+    // Public, smoothed classification (string label for debugging/telemetry)
+    this.profile = "mid_energy_balanced";
+
+    // Internal smoothed descriptors (0..1)
+    this.energy = 0;
+    this.variability = 0;
+    this.low = 0;
+    this.mid = 0;
+    this.high = 0;
+
+    // Beat envelope for subtle modulation (no flashing)
+    this._beatEnv = 0;
+    this._lastUpdateTs = 0;
+
+    // Smoothed outputs consumed by visuals (avoid per-frame allocations)
+    this.out = {
+      // Spectrum smoothing: smaller = snappier, larger = smoother
+      spectrumAlpha: 0.15,
+
+      // Global mapping multipliers (applied in main loop)
+      scaleAmp: 0.02, // targetScale = 1 + visualEnergy * scaleAmp
+      intensityBase: 0.15,
+      intensityAmp: 0.35,
+
+      // Rhythm-based global behavior (small ranges; continuous; no pulses)
+      // - `motionSpeedMultiplier` affects time-based motion rates.
+      // - `decayRateMultiplier` affects fade/decay speeds (higher = faster decay).
+      // - `detailIntensityMultiplier` affects small-detail density (trails/glow/line thickness).
+      // - `colorShift` is a subtle 0..1 factor you can map to hue offsets if desired.
+      motionSpeedMultiplier: 1.0,
+      decayRateMultiplier: 1.0,
+      detailIntensityMultiplier: 1.0,
+      colorShift: 0.0,
+
+      // Per-mode behavior knobs
+      barSpacingScale: 1.0,
+      barWidthScale: 1.0,
+      barHeightScale: 1.0,
+
+      circlesRadiusScale: 1.0,
+      circlesSizeScale: 1.0,
+      circlesTrailScale: 1.0,
+
+      // Subtle rhythmic modulation
+      beatEnv: 0,
+
+      // Optional recommendation (no auto-switch by default)
+      recommendedVisualType: "frequency3x",
+    };
+
+    // Tunables (kept conservative to avoid jitter)
+    this._alphaEnergy = 0.04;
+    this._alphaVariability = 0.06;
+    this._alphaBands = 0.08;
+    this._alphaOutputs = 0.06;
+
+    // Hysteresis for discrete labels (prevents rapid flipping)
+    this._energyLabel = "mid";
+    this._variabilityLabel = "balanced";
+  }
+
+  update({
+    timestampMs,
+    combinedNorm,
+    normDelta,
+    lowNorm,
+    midNorm,
+    highNorm,
+    dominantBand,
+    beatDetected,
+    bpmEstimate,
+  }) {
+    // Time step (for beat envelope decay)
+    const ts = typeof timestampMs === "number" ? timestampMs : 0;
+    const dtMs =
+      this._lastUpdateTs > 0 ? Math.max(0, ts - this._lastUpdateTs) : 16;
+    this._lastUpdateTs = ts;
+
+    // Smooth descriptors (all 0..1)
+    const e = clamp01(combinedNorm);
+    const v = clamp01(normDelta);
+    this.energy += (e - this.energy) * this._alphaEnergy;
+    this.variability += (v - this.variability) * this._alphaVariability;
+    this.low += (clamp01(lowNorm) - this.low) * this._alphaBands;
+    this.mid += (clamp01(midNorm) - this.mid) * this._alphaBands;
+    this.high += (clamp01(highNorm) - this.high) * this._alphaBands;
+
+    // Beat envelope: quick rise on beat, smooth decay
+    if (beatDetected) this._beatEnv = Math.min(1, this._beatEnv + 0.25);
+    const beatDecayPerMs = 0.0016; // ~0.6s to fade from 1 -> 0
+    this._beatEnv = Math.max(0, this._beatEnv - dtMs * beatDecayPerMs);
+
+    // Discrete labels with hysteresis (used only for profile string + recommendations)
+    this._energyLabel = this._hysteresisEnergyLabel(
+      this.energy,
+      this._energyLabel,
+    );
+    this._variabilityLabel = this._hysteresisVariabilityLabel(
+      this.variability,
+      this._variabilityLabel,
+    );
+
+    const bandLabel =
+      dominantBand === 0
+        ? "bass_heavy"
+        : dominantBand === 2
+          ? "high_heavy"
+          : "balanced";
+
+    // Style profile string (stable, but still updates over time)
+    this.profile = `${this._energyLabel}_energy_${this._variabilityLabel}`;
+
+    // Map style → continuous behavior knobs.
+    // Goal: feel "aware" but never jumpy; all outputs are smoothed below.
+    const target = this._computeTargets({
+      energy: this.energy,
+      variability: this.variability,
+      bandLabel,
+      bpmEstimate: typeof bpmEstimate === "number" ? bpmEstimate : 0,
+      beatEnv: this._beatEnv,
+    });
+
+    // Smooth outputs (single object reused; no allocations)
+    for (const k in target) {
+      this.out[k] += (target[k] - this.out[k]) * this._alphaOutputs;
+    }
+
+    // Discrete recommendation (smoothed by using conservative switching rules)
+    this.out.recommendedVisualType = this._recommendMode({
+      energyLabel: this._energyLabel,
+      variabilityLabel: this._variabilityLabel,
+      bandLabel,
+      bpmEstimate,
+    });
+
+    // Expose beat envelope for subtle modulation
+    this.out.beatEnv = this._beatEnv;
+  }
+
+  _computeTargets({ energy, variability, bandLabel, bpmEstimate, beatEnv }) {
+    // Spectrum smoothing: more snappy when energetic/dynamic, smoother when calm/stable
+    const spectrumAlpha =
+      lerp(0.1, 0.2, 1 - energy) * lerp(1.05, 0.85, variability);
+
+    // Global scale/intensity mappings (kept subtle)
+    const scaleAmp = lerp(0.016, 0.028, energy) * lerp(0.95, 1.05, variability);
+    const intensityBase = lerp(0.12, 0.2, energy);
+    const intensityAmp =
+      lerp(0.26, 0.46, energy) * lerp(0.9, 1.08, variability);
+
+    // Bars: tighter + taller for energetic/dynamic, wider + calmer for smooth/low
+    const barSpacingScale =
+      lerp(1.08, 0.92, energy) * lerp(1.05, 0.95, variability);
+    const barWidthScale = lerp(1.1, 0.95, energy);
+    const barHeightScale =
+      lerp(0.92, 1.12, energy) * lerp(0.95, 1.05, variability);
+
+    // Circles: larger radius / slower-looking motion for low energy; tighter + sharper for high energy
+    const circlesRadiusScale = lerp(1.18, 0.92, energy);
+    const circlesSizeScale = lerp(1.1, 0.92, energy);
+    const circlesTrailScale =
+      lerp(1.25, 0.85, energy) * lerp(1.1, 0.95, variability);
+
+    const bpm = clamp(bpmEstimate || 0, 0, 220);
+    const bpmNorm = bpm > 0 ? clamp01((bpm - 70) / 90) : 0.45; // 70..160 -> 0..1
+
+    // Beat envelope can also gently lift intensity (no pulses)
+    const beatLift = 1 + beatEnv * 0.06;
+
+    return {
+      spectrumAlpha: clamp(spectrumAlpha, 0.08, 0.24),
+      scaleAmp: clamp(scaleAmp, 0.012, 0.032),
+      intensityBase: clamp(intensityBase, 0.1, 0.24),
+      intensityAmp: clamp(intensityAmp * beatLift, 0.22, 0.55),
+
+      // Standardized rhythm behavior knobs (keep within ~1.0..1.1 ranges):
+      // - Beat envelope provides short-lived lift.
+      // - BPM provides a stable baseline: faster songs = slightly faster motion + decay.
+      motionSpeedMultiplier: clamp(
+        lerp(0.98, 1.08, bpmNorm) * (1 + beatEnv * 0.04),
+        0.95,
+        1.12,
+      ),
+      decayRateMultiplier: clamp(
+        lerp(0.98, 1.09, bpmNorm) * (1 + beatEnv * 0.03),
+        0.95,
+        1.14,
+      ),
+      detailIntensityMultiplier: clamp(
+        lerp(0.98, 1.08, energy) * (1 + beatEnv * 0.05),
+        0.95,
+        1.15,
+      ),
+      // Subtle continuous color drift driver (0..1). No direct hue jumps are applied by default.
+      colorShift: clamp01(lerp(0.25, 0.75, bpmNorm) * 0.7 + beatEnv * 0.2),
+
+      barSpacingScale: clamp(barSpacingScale, 0.8, 1.2),
+      barWidthScale: clamp(barWidthScale, 0.85, 1.2),
+      barHeightScale: clamp(barHeightScale, 0.8, 1.25),
+
+      circlesRadiusScale: clamp(circlesRadiusScale, 0.8, 1.35),
+      circlesSizeScale: clamp(circlesSizeScale, 0.8, 1.25),
+      circlesTrailScale: clamp(circlesTrailScale, 0.7, 1.5),
+    };
+  }
+
+  _recommendMode({ energyLabel, variabilityLabel, bandLabel, bpmEstimate }) {
+    // Conservative, "suggestion-only" recommendations.
+    // Avoid rapid changes: recommendation itself is not auto-applied unless user enables it.
+    if (energyLabel === "low" && variabilityLabel === "smooth")
+      return "circles";
+    if (energyLabel === "high" && variabilityLabel === "fast")
+      return "frequency3x";
+    return "frequency4x";
+  }
+
+  _hysteresisEnergyLabel(x, prev) {
+    // Thresholds (with hysteresis band) tuned for combinedNorm 0..1.
+    const lowToMid = 0.32;
+    const midToHigh = 0.62;
+    const h = 0.04;
+    if (prev === "low") {
+      return x > lowToMid + h ? "mid" : "low";
+    }
+    if (prev === "high") {
+      return x < midToHigh - h ? "mid" : "high";
+    }
+    // prev === mid
+    if (x < lowToMid - h) return "low";
+    if (x > midToHigh + h) return "high";
+    return "mid";
+  }
+
+  _hysteresisVariabilityLabel(x, prev) {
+    const smoothToBal = 0.2;
+    const balToFast = 0.55;
+    const h = 0.05;
+    if (prev === "smooth") {
+      return x > smoothToBal + h ? "balanced" : "smooth";
+    }
+    if (prev === "fast") {
+      return x < balToFast - h ? "balanced" : "fast";
+    }
+    // balanced
+    if (x < smoothToBal - h) return "smooth";
+    if (x > balToFast + h) return "fast";
+    return "balanced";
+  }
+}
+
+function clamp(x, min, max) {
+  return x < min ? min : x > max ? max : x;
+}
+function clamp01(x) {
+  return x <= 0 ? 0 : x >= 1 ? 1 : x;
+}
+function lerp(a, b, t) {
+  return a + (b - a) * t;
+}
+
 class AudioVisualizer {
   constructor() {
     this.audioContext = null;
@@ -16,9 +557,33 @@ class AudioVisualizer {
     this.dataArray = new Uint8Array(128);
     this.frequencyData = new Uint8Array(128);
     this.smoothedFrequencyData = new Float32Array(128);
+    this.boostedFrequencyData = new Float32Array(128);
+
+    // Lissajous mode buffers (time-domain smoothing; no per-frame allocations)
+    // Stored as normalized floats in [-1..1]
+    this._lissX = new Float32Array(this.dataArray.length);
+    this._lissY = new Float32Array(this.dataArray.length);
+    this._lissOffset = (this.dataArray.length * 0.25) | 0; // phase offset fallback (pseudo-stereo)
+    this._lissT = 0; // running phase for infinity motion
+
+    // Rhythm / beat tracking (kept lightweight, no per-frame allocations)
+    this.rhythm = new RhythmTracker();
+    this.energyNorm = new AdaptiveEnergyNormalizer();
+    this.style = new StyleEngine();
+    this.behavior = this.style.out;
+    // Continuous (non-beat) energy signal for visuals (smoothed; no spikes)
+    this.visualEnergy = 0; // 0..1-ish
+    this.visualScale = 1; // smoothed scale derived from visualEnergy
+    this.visualIntensity = 0; // 0..1 subtle global intensity (no flashing)
+    // Adaptive smoothing state (fast tracks vs slow tracks)
+    this._prevTargetEnergy = 0;
+    this._deltaEnv = 0.02; // rolling “typical delta” envelope to normalize change rate
 
     this.sensitivity = 1.0;
+    // Hue offset (0..360) to rotate the global rainbow palette
+    this.hueOffset = 200;
     this.visualType = "frequency3x";
+    this._lastVisualType = this.visualType;
 
     // Fullscreen mode properties
     this.isFullscreen = false;
@@ -31,11 +596,47 @@ class AudioVisualizer {
     this.raindropInterval = 200; // Create raindrop every 200ms when bars are active (increased from 100ms)
     this.barRaindropTimers = []; // Individual timers for each bar position
 
+    // Particle flow effect properties
+    // Keep a relatively small, fixed pool for performance.
+    this.particleFlowParticles = [];
+    // Hard-cap to a low, safe range (will be clamped again in init).
+    this.particleFlowCount = 120;
+    this._particleFlowFrame = 0;
+    // Adaptive quality: dynamically adjusts particle count when the renderer is under load.
+    // Key design choice: only touches Particle Flow (other modes remain visually identical).
+    this._perf = {
+      avgFrameMs: 0,
+      lastFrameTs: 0,
+      lastAdjustTs: 0,
+    };
+    this._particlePerf = {
+      // Conservative thresholds: aim for smoothness over maximum particle density.
+      adjustCooldownMs: 2200,
+      slowFactor: 1.35, // avgFrameMs > budget * slowFactor => reduce particles
+      fastFactor: 0.85, // avgFrameMs < budget * fastFactor => increase particles
+      stepDown: 10,
+      stepUp: 6,
+      minCount: 70,
+      maxCount: 140,
+    };
+    // Tiny cache to reduce per-particle HSLA string churn in Particle Flow.
+    // Cleared opportunistically when it grows too large.
+    this._hslaCache = new Map();
+    this._hslaCacheMax = 2048;
+
     // Performance controls
     this.targetFPS = 45; // reduce FPS for lower resource usage
     this.lastFrameTime = 0;
+    // Debounced preference writes (sliders can fire dozens of events per second).
+    this._prefsSaveTimer = null;
+
+    // Optional: auto mode switching (disabled by default; recommendation-only unless enabled)
+    this.autoModeSwitch = false;
+    this._lastAutoSwitchTs = 0;
+    this._autoSwitchCooldownMs = 14000; // slow transitions only
 
     this.init();
+    this.initParticleFlowPool();
     this.loadUserPreferences(); // Load saved preferences
     this.updateButtonStates(); // Initialize button states
   }
@@ -71,8 +672,20 @@ class AudioVisualizer {
       if (sensitivityValue) {
         sensitivityValue.textContent = this.sensitivity.toFixed(1);
       }
-      this.saveUserPreferences(); // Save preference
+      // Debounce saves to keep UI responsive while dragging.
+      this.scheduleSaveUserPreferences();
     });
+    const hueSlider = document.getElementById("hueOffset");
+    if (hueSlider) {
+      hueSlider.addEventListener("input", (e) => {
+        const v = parseInt(e.target.value, 10);
+        this.hueOffset = Number.isFinite(v) ? v : 200;
+        const hueValue = document.getElementById("hueOffsetValue");
+        if (hueValue) hueValue.textContent = String(this.hueOffset);
+        // Debounce saves to keep UI responsive while dragging.
+        this.scheduleSaveUserPreferences();
+      });
+    }
 
     // Handle window resize
     window.addEventListener("resize", () => this.handleResize());
@@ -84,6 +697,16 @@ class AudioVisualizer {
         this.canvas.height = window.innerHeight;
       }
     });
+  }
+
+  // Debounced wrapper for preference persistence.
+  // Rationale: localStorage writes can cause jank on some devices when called per slider tick.
+  scheduleSaveUserPreferences(delayMs = 160) {
+    if (this._prefsSaveTimer) clearTimeout(this._prefsSaveTimer);
+    this._prefsSaveTimer = setTimeout(() => {
+      this._prefsSaveTimer = null;
+      this.saveUserPreferences();
+    }, delayMs);
   }
 
   setupCanvas() {
@@ -120,6 +743,10 @@ class AudioVisualizer {
     if (!this.ctx) {
       this.ctx = this.canvas.getContext("2d");
     }
+
+    if (this.particleFlowParticles && this.particleFlowParticles.length > 0) {
+      this.initParticleFlowPool();
+    }
   }
 
   handleResize() {
@@ -131,17 +758,16 @@ class AudioVisualizer {
       this.updateStatus("Requesting microphone access...", "active");
 
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-      this.audioContext = new (window.AudioContext ||
-        window.webkitAudioContext)();
+      this.audioContext = new (
+        window.AudioContext || window.webkitAudioContext
+      )();
       this.analyser = this.audioContext.createAnalyser();
       this.gainNode = this.audioContext.createGain();
       this.microphone = this.audioContext.createMediaStreamSource(stream);
 
       this.analyser.fftSize = 256;
       this.analyser.smoothingTimeConstant = 0.9; // Increased from 0.8 for smoother response
-
-      // Initialize smoothing buffer to zeros
-      this.smoothedFrequencyData = new Float32Array(this.frequencyData.length);
+      this.syncAnalyserBuffers();
 
       this.microphone.connect(this.analyser);
       // Remove audio playback - only connect for visualization
@@ -151,7 +777,7 @@ class AudioVisualizer {
       this.isPlaying = true;
       this.updateStatus(
         "Microphone active - Speak or play music! (Audio not played back)",
-        "active"
+        "active",
       );
       this.updateButtonStates(); // Update button states
       this.startVisualization();
@@ -159,7 +785,7 @@ class AudioVisualizer {
       console.error("Error accessing microphone:", error);
       this.updateStatus(
         "Error: Could not access microphone. Please check permissions.",
-        "error"
+        "error",
       );
     }
   }
@@ -171,7 +797,7 @@ class AudioVisualizer {
       // Better mobile detection - check for actual mobile capabilities
       const isMobile =
         /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(
-          navigator.userAgent
+          navigator.userAgent,
         ) ||
         (window.innerWidth <= 768 && window.innerHeight > window.innerWidth) ||
         ("ontouchstart" in window && window.innerWidth <= 768);
@@ -180,14 +806,14 @@ class AudioVisualizer {
       if (isMobile) {
         this.updateStatus(
           "Mobile detected - Attempting system audio capture...",
-          "active"
+          "active",
         );
 
         // Show user guidance for better system audio capture
         setTimeout(() => {
           this.updateStatus(
             "💡 Tip: For best system audio capture, play music through your phone's speakers or headphones",
-            "info"
+            "info",
           );
         }, 2000);
 
@@ -199,14 +825,14 @@ class AudioVisualizer {
         try {
           this.updateStatus(
             "Trying to capture from audio output devices...",
-            "active"
+            "active",
           );
           stream = await this.tryAudioOutputCapture();
           if (stream) {
             captureMethod = "audiooutput";
             this.updateStatus(
               "Audio output device capture successful!",
-              "active"
+              "active",
             );
           }
         } catch (error) {
@@ -218,14 +844,14 @@ class AudioVisualizer {
           try {
             this.updateStatus(
               "Trying advanced system audio capture...",
-              "active"
+              "active",
             );
             stream = await this.tryCaptureSystemAudio();
             if (stream) {
               captureMethod = "advanced";
               this.updateStatus(
                 "Advanced system audio capture successful!",
-                "active"
+                "active",
               );
             }
           } catch (error) {
@@ -238,14 +864,14 @@ class AudioVisualizer {
           try {
             this.updateStatus(
               "Trying audio context system audio capture...",
-              "active"
+              "active",
             );
             stream = await this.tryAudioContextCapture();
             if (stream) {
               captureMethod = "audiocontext";
               this.updateStatus(
                 "Audio context system audio capture successful!",
-                "active"
+                "active",
               );
             }
           } catch (error) {
@@ -258,14 +884,14 @@ class AudioVisualizer {
           try {
             this.updateStatus(
               "Trying AudioWorklet system audio capture...",
-              "active"
+              "active",
             );
             stream = await this.tryAudioWorkletCapture();
             if (stream) {
               captureMethod = "audioworklet";
               this.updateStatus(
                 "AudioWorklet system audio capture successful!",
-                "active"
+                "active",
               );
             }
           } catch (error) {
@@ -278,14 +904,14 @@ class AudioVisualizer {
           try {
             this.updateStatus(
               "Trying alternative system audio capture...",
-              "active"
+              "active",
             );
             stream = await this.tryAlternativeSystemAudio();
             if (stream) {
               captureMethod = "alternative";
               this.updateStatus(
                 "Alternative system audio capture successful!",
-                "active"
+                "active",
               );
             }
           } catch (error) {
@@ -298,14 +924,14 @@ class AudioVisualizer {
           try {
             this.updateStatus(
               "Trying MediaRecorder system audio capture...",
-              "active"
+              "active",
             );
             stream = await this.tryMediaRecorderSystemAudio();
             if (stream) {
               captureMethod = "mediarecorder";
               this.updateStatus(
                 "MediaRecorder system audio capture successful!",
-                "active"
+                "active",
               );
             }
           } catch (error) {
@@ -318,14 +944,14 @@ class AudioVisualizer {
           try {
             this.updateStatus(
               "Trying display media system audio capture...",
-              "active"
+              "active",
             );
             stream = await this.tryDisplayMediaSystemAudio();
             if (stream) {
               captureMethod = "display";
               this.updateStatus(
                 "Display media system audio capture successful!",
-                "active"
+                "active",
               );
             }
           } catch (error) {
@@ -338,7 +964,7 @@ class AudioVisualizer {
           try {
             this.updateStatus(
               "All system audio methods failed - Trying enhanced microphone...",
-              "active"
+              "active",
             );
             stream = await navigator.mediaDevices.getUserMedia({
               audio: {
@@ -356,7 +982,7 @@ class AudioVisualizer {
             captureMethod = "enhanced";
             this.updateStatus(
               "Enhanced microphone active - Place device near speakers for best results!",
-              "active"
+              "active",
             );
           } catch (error) {
             console.warn("Enhanced microphone failed:", error);
@@ -373,13 +999,13 @@ class AudioVisualizer {
             captureMethod = "basic";
             this.updateStatus(
               "Basic microphone active - Place device near speakers for best results!",
-              "active"
+              "active",
             );
           } catch (error) {
             console.error("All mobile audio capture methods failed:", error);
             this.updateStatus(
               "Mobile audio capture failed. Please check microphone permissions.",
-              "error"
+              "error",
             );
             return;
           }
@@ -387,18 +1013,20 @@ class AudioVisualizer {
 
         // Log the capture method used
         console.log(
-          `Mobile audio capture completed using method: ${captureMethod}`
+          `Mobile audio capture completed using method: ${captureMethod}`,
         );
 
         // Set up audio context and analyser with the captured stream
         if (stream) {
-          this.audioContext = new (window.AudioContext ||
-            window.webkitAudioContext)();
+          this.audioContext = new (
+            window.AudioContext || window.webkitAudioContext
+          )();
           this.analyser = this.audioContext.createAnalyser();
           this.analyser.fftSize = 256;
           this.analyser.smoothingTimeConstant = 0.8;
           this.analyser.minDecibels = -90;
           this.analyser.maxDecibels = -10;
+          this.syncAnalyserBuffers();
 
           // Create gain node for volume control
           this.gainNode = this.audioContext.createGain();
@@ -423,56 +1051,56 @@ class AudioVisualizer {
                 screenShareBtn.textContent = "📱 System Audio Active";
                 this.updateStatus(
                   "System audio capture successful! Music and sounds from your phone will now be visualized.",
-                  "active"
+                  "active",
                 );
                 break;
               case "system":
                 screenShareBtn.textContent = "📱 System Audio Active";
                 this.updateStatus(
                   "System audio capture successful! Place device near speakers for best results.",
-                  "active"
+                  "active",
                 );
                 break;
               case "audiocontext":
                 screenShareBtn.textContent = "📱 System Audio Active";
                 this.updateStatus(
                   "Audio context system audio capture successful! Music and sounds from your phone will now be visualized.",
-                  "active"
+                  "active",
                 );
                 break;
               case "audioworklet":
                 screenShareBtn.textContent = "📱 System Audio Active";
                 this.updateStatus(
                   "AudioWorklet system audio capture successful! Music and sounds from your phone will now be visualized.",
-                  "active"
+                  "active",
                 );
                 break;
               case "alternative":
                 screenShareBtn.textContent = "📱 Alt System Audio Active";
                 this.updateStatus(
                   "Alternative system audio capture successful! Place device near speakers for best results.",
-                  "active"
+                  "active",
                 );
                 break;
               case "display":
                 screenShareBtn.textContent = "📱 Display Audio Active";
                 this.updateStatus(
                   "Display audio capture successful! Place device near speakers for best results.",
-                  "active"
+                  "active",
                 );
                 break;
               case "enhanced":
                 screenShareBtn.textContent = "📱 Enhanced Audio Active";
                 this.updateStatus(
                   "Enhanced audio capture active! Place device near speakers for best results.",
-                  "active"
+                  "active",
                 );
                 break;
               default:
                 screenShareBtn.textContent = "📱 Basic Audio Active";
                 this.updateStatus(
                   "Basic audio capture active! Place device near speakers for best results.",
-                  "active"
+                  "active",
                 );
                 break;
             }
@@ -497,8 +1125,9 @@ class AudioVisualizer {
         audio: true,
       });
 
-      this.audioContext = new (window.AudioContext ||
-        window.webkitAudioContext)();
+      this.audioContext = new (
+        window.AudioContext || window.webkitAudioContext
+      )();
       this.analyser = this.audioContext.createAnalyser();
       this.gainNode = this.audioContext.createGain();
 
@@ -518,7 +1147,7 @@ class AudioVisualizer {
       this.isPlaying = true;
       this.updateStatus(
         "Screen share active - Audio from your screen is being visualized!",
-        "active"
+        "active",
       );
       this.updateButtonStates(); // Update button states
       this.startVisualization();
@@ -533,12 +1162,12 @@ class AudioVisualizer {
       if (error.name === "NotAllowedError") {
         this.updateStatus(
           "Screen share denied. Please allow access to share your screen.",
-          "error"
+          "error",
         );
       } else {
         this.updateStatus(
           "Error starting screen share: " + error.message,
-          "error"
+          "error",
         );
       }
     }
@@ -581,6 +1210,16 @@ class AudioVisualizer {
         this.animationId = requestAnimationFrame(animate);
         return;
       }
+
+      // Lightweight performance tracking for adaptive Particle Flow quality.
+      // We track *rendered* frame times (after throttle) so the signal is stable.
+      if (!this._perf.lastFrameTs) this._perf.lastFrameTs = timestamp;
+      const renderedDelta = timestamp - this._perf.lastFrameTs;
+      this._perf.lastFrameTs = timestamp;
+      // EMA: stable on jittery clocks; low overhead.
+      this._perf.avgFrameMs = this._perf.avgFrameMs
+        ? this._perf.avgFrameMs * 0.9 + renderedDelta * 0.1
+        : renderedDelta;
       this.lastFrameTime = timestamp;
 
       // Ensure frequency data arrays are properly sized
@@ -588,31 +1227,152 @@ class AudioVisualizer {
         this.analyser.getByteFrequencyData(this.frequencyData);
         this.analyser.getByteTimeDomainData(this.dataArray);
 
-        // Create boosted frequency data for enhanced high-end response
-        this.boostedFrequencyData = this.applyHighEndBoost(this.frequencyData);
+        // Create boosted frequency data for enhanced high-end response (reused buffer)
+        this.applyHighEndBoost(this.frequencyData, this.boostedFrequencyData);
 
-        // Temporal smoothing (exponential moving average)
-        if (
-          !this.smoothedFrequencyData ||
-          this.smoothedFrequencyData.length !== this.frequencyData.length
-        ) {
-          this.smoothedFrequencyData = new Float32Array(
-            this.frequencyData.length
-          );
+        const sr = this.audioContext ? this.audioContext.sampleRate : 0;
+
+        // Rhythm tracking (uses low-frequency energy)
+        this.rhythm.update(this.frequencyData, sr, timestamp);
+
+        // Adaptive normalization (low/mid/high + combinedNorm)
+        this.energyNorm.update(this.frequencyData, sr);
+
+        // Compute energy change rate (already used for adaptive smoothing); reuse for style intelligence.
+        const targetEnergyForDelta = this.energyNorm.combinedNorm;
+        const deltaForStyle = Math.abs(
+          targetEnergyForDelta - this._prevTargetEnergy,
+        );
+
+        // Rolling delta envelope (fast attack, slow release)
+        if (deltaForStyle > this._deltaEnv)
+          this._deltaEnv += (deltaForStyle - this._deltaEnv) * 0.25;
+        else this._deltaEnv += (deltaForStyle - this._deltaEnv) * 0.02;
+        const normDeltaForStyle = Math.min(
+          1,
+          deltaForStyle / Math.max(1e-6, this._deltaEnv),
+        );
+
+        // Update style engine (smoothed classification + behavior knobs)
+        this.style.update({
+          timestampMs: timestamp,
+          combinedNorm: targetEnergyForDelta,
+          normDelta: normDeltaForStyle,
+          lowNorm: this.energyNorm.lowNorm,
+          midNorm: this.energyNorm.midNorm,
+          highNorm: this.energyNorm.highNorm,
+          dominantBand: this.energyNorm.dominantBand,
+          beatDetected: this.rhythm.beatDetected,
+          bpmEstimate: this.rhythm.bpmEstimate,
+        });
+
+        // Optional auto mode switching (disabled by default)
+        if (this.autoModeSwitch) {
+          const now = timestamp;
+          const rec = this.behavior.recommendedVisualType;
+          if (
+            rec &&
+            rec !== this.visualType &&
+            now - this._lastAutoSwitchTs >= this._autoSwitchCooldownMs
+          ) {
+            this.visualType = rec;
+            const visualTypeSelect = document.getElementById("visualType");
+            if (visualTypeSelect) visualTypeSelect.value = rec;
+            this.saveUserPreferences();
+            this._lastAutoSwitchTs = now;
+          }
         }
-        const alpha = 0.15; // Reduced smoothing factor for smoother animations (was 0.2)
+
+        // Temporal smoothing (exponential moving average) over boosted data (no allocations).
+        // Alpha is driven by StyleEngine: energetic/dynamic tracks feel snappier; calm tracks feel smoother.
+        const alpha = this.behavior.spectrumAlpha;
         for (let i = 0; i < this.frequencyData.length; i++) {
           const current = this.boostedFrequencyData[i];
           this.smoothedFrequencyData[i] =
             alpha * current + (1 - alpha) * this.smoothedFrequencyData[i];
         }
+
+        // Visual mappings (all smoothed; no spikes):
+        // - `visualEnergy` is the primary driver (0..1).
+        // - `visualScale` stays subtle; `visualIntensity` can be used to gently boost contrast.
+        const targetEnergy = targetEnergyForDelta;
+
+        // Adaptive smoothing:
+        // - Measure energy change rate (delta).
+        // - High delta => lower smoothing (faster response for rapid transients).
+        // - Low delta  => higher smoothing (stable for slow/ambient sections).
+        // - Asymmetric smoothing: faster attack, slower decay.
+        const delta = deltaForStyle;
+        this._prevTargetEnergy = targetEnergy;
+        const normDelta = normDeltaForStyle;
+        const lerp = (a, b, t) => a + (b - a) * t;
+
+        // Tune: minAlpha/maxAlpha control slow vs fast responsiveness
+        const minAlpha = 0.04; // smoothest
+        const maxAlpha = 0.22; // snappiest (still non-jittery)
+        const baseAlpha = lerp(minAlpha, maxAlpha, normDelta);
+
+        const diff = targetEnergy - this.visualEnergy;
+        const alphaEnergy =
+          diff >= 0
+            ? Math.min(maxAlpha, baseAlpha * 1.15) // faster attack
+            : Math.max(minAlpha, baseAlpha * 0.75); // slower decay
+        this.visualEnergy += diff * alphaEnergy;
+
+        const targetScale = 1 + this.visualEnergy * this.behavior.scaleAmp; // subtle, style-aware
+        // Scale follows energy but slightly more damped than energy
+        const alphaScale = Math.max(0.03, baseAlpha * 0.55);
+        this.visualScale += (targetScale - this.visualScale) * alphaScale;
+        const targetIntensity =
+          this.behavior.intensityBase +
+          this.visualEnergy * this.behavior.intensityAmp;
+        // Intensity should be smoothest to avoid any perceived flashing
+        const alphaIntensity = Math.max(0.02, baseAlpha * 0.4);
+        this.visualIntensity +=
+          (targetIntensity - this.visualIntensity) * alphaIntensity;
       }
+
+      // Adaptive particle count (Particle Flow only).
+      // Keeps the rest of the app identical while smoothing the heaviest mode.
+      this.maybeAdjustParticleFlowQuality(timestamp);
 
       this.draw();
       this.animationId = requestAnimationFrame(animate);
     };
 
     this.animationId = requestAnimationFrame(animate);
+  }
+
+  maybeAdjustParticleFlowQuality(timestampMs) {
+    if (this.visualType !== "particleFlow") return;
+    const perf = this._perf;
+    const cfg = this._particlePerf;
+    if (!perf || !cfg) return;
+
+    const budget = 1000 / (this.targetFPS || 45);
+    const now = timestampMs || performance.now();
+    if (perf.lastAdjustTs && now - perf.lastAdjustTs < cfg.adjustCooldownMs) {
+      return;
+    }
+
+    const avg = perf.avgFrameMs || 0;
+    if (!avg) return;
+
+    let next = this.particleFlowCount || 120;
+    if (avg > budget * cfg.slowFactor) {
+      next = Math.max(cfg.minCount, next - cfg.stepDown);
+    } else if (avg < budget * cfg.fastFactor) {
+      next = Math.min(cfg.maxCount, next + cfg.stepUp);
+    } else {
+      return;
+    }
+
+    if (next !== this.particleFlowCount) {
+      this.particleFlowCount = next;
+      // Reinit the pool to match the new target count.
+      this.initParticleFlowPool();
+      perf.lastAdjustTs = now;
+    }
   }
 
   stopVisualization() {
@@ -646,7 +1406,7 @@ class AudioVisualizer {
 
     this.updateStatus(
       "Fullscreen mode - Move mouse to show controls, press ESC to exit",
-      "active"
+      "active",
     );
   }
 
@@ -655,10 +1415,23 @@ class AudioVisualizer {
     if (!container) return;
 
     container.classList.remove("fullscreen-mode", "show-ui");
+    document.body.classList.remove("cursor-hidden");
     this.isFullscreen = false;
 
     // Restore original canvas size
     this.setupCanvas();
+
+    // Remove fullscreen event listeners immediately (prevents buildup if user toggles
+    // fullscreen without stopping the visualizer).
+    if (this.fullscreenMouseHandler) {
+      container.removeEventListener("mousemove", this.fullscreenMouseHandler);
+      container.removeEventListener("click", this.fullscreenMouseHandler);
+      this.fullscreenMouseHandler = null;
+    }
+    if (this.fullscreenKeyHandler) {
+      document.removeEventListener("keydown", this.fullscreenKeyHandler);
+      this.fullscreenKeyHandler = null;
+    }
 
     // Clear mouse movement timeout
     if (this.uiTimeout) {
@@ -674,6 +1447,7 @@ class AudioVisualizer {
     if (!container) return;
 
     const showUI = () => {
+      document.body.classList.remove("cursor-hidden");
       container.classList.add("show-ui");
 
       // Clear existing timeout
@@ -685,6 +1459,7 @@ class AudioVisualizer {
       this.uiTimeout = setTimeout(() => {
         if (this.isFullscreen) {
           container.classList.remove("show-ui");
+          document.body.classList.add("cursor-hidden");
         }
       }, this.uiHideDelay);
     };
@@ -779,11 +1554,45 @@ class AudioVisualizer {
 
   draw() {
     if (!this.canvas || !this.ctx) return;
+    const ctx = this.ctx;
+    const w = this.canvas.width;
+    const h = this.canvas.height;
 
-    this.ctx.clearRect(0, 0, this.canvas.width, this.canvas.height);
+    // Reset state that can "stick" across frames/modes (prevents phantom glow/composite).
+    ctx.globalCompositeOperation = "source-over";
+    ctx.globalAlpha = 1;
+    ctx.shadowBlur = 0;
+    ctx.shadowColor = "transparent";
+
+    // If mode changed, hard clear once to avoid inheriting previous mode's last frame.
+    if (this._lastVisualType !== this.visualType) {
+      ctx.clearRect(0, 0, w, h);
+    }
+
+    // Lissajous looks best with a subtle decay trail (stable, non-flashy).
+    if (this.visualType === "lissajous") {
+      // Higher alpha = faster fade (shorter afterimage)
+      // Make it noticeably faster (near-clear) while still keeping a tiny trail.
+      ctx.fillStyle = "rgba(6, 7, 9, 0.70)";
+      ctx.fillRect(0, 0, w, h);
+    } else if (this.visualType === "particleFlow") {
+      // No trails: hard clear every frame.
+      ctx.clearRect(0, 0, w, h);
+    } else {
+      ctx.clearRect(0, 0, w, h);
+    }
 
     // Use boosted frequency data if available, otherwise fall back to original
     const frequencyData = this.boostedFrequencyData || this.frequencyData;
+
+    // Continuous, subtle energy scale (no beat/pulse spikes)
+    const scale = this.visualScale || 1;
+    ctx.save();
+    ctx.translate(w * 0.5, h * 0.5);
+    ctx.scale(scale, scale);
+    ctx.translate(-w * 0.5, -h * 0.5);
+    // Very subtle global intensity boost (kept smooth; no flashing)
+    ctx.globalAlpha = 0.85 + Math.min(0.15, this.visualIntensity * 0.15);
 
     switch (this.visualType) {
       case "waveform":
@@ -791,6 +1600,9 @@ class AudioVisualizer {
         break;
       case "circular":
         this.drawCircular();
+        break;
+      case "lissajous":
+        this.drawLissajous();
         break;
       case "frequency2x":
         this.drawFrequencyBars2x();
@@ -804,22 +1616,22 @@ class AudioVisualizer {
       case "circles":
         this.drawCircles();
         break;
-      case "starlight":
-        this.drawStarlight();
-        break;
-      case "retroBox":
-        this.drawRetroBox();
+      case "particleFlow":
+        this.drawParticleFlow();
         break;
     }
+
+    ctx.restore();
+
+    this._lastVisualType = this.visualType;
 
     // Removed updateAudioInfo() for better performance
   }
 
   // High-end frequency boost function to enhance treble response
-  applyHighEndBoost(frequencyData) {
-    if (!frequencyData || frequencyData.length === 0) return frequencyData;
-
-    const boostedData = new Float32Array(frequencyData.length);
+  applyHighEndBoost(frequencyData, outBuffer) {
+    if (!frequencyData || frequencyData.length === 0) return;
+    if (!outBuffer || outBuffer.length !== frequencyData.length) return;
     const highEndStart = Math.floor(frequencyData.length * 0.6); // Last 40% of frequencies are high-end
 
     for (let i = 0; i < frequencyData.length; i++) {
@@ -834,20 +1646,117 @@ class AudioVisualizer {
         value = Math.min(255, value * (1 + boostAmount));
       }
 
-      boostedData[i] = value;
+      outBuffer[i] = value;
+    }
+  }
+
+  syncAnalyserBuffers() {
+    if (!this.analyser) return;
+    const binCount = this.analyser.frequencyBinCount;
+
+    if (!this.frequencyData || this.frequencyData.length !== binCount) {
+      this.frequencyData = new Uint8Array(binCount);
+    }
+    if (!this.dataArray || this.dataArray.length !== binCount) {
+      this.dataArray = new Uint8Array(binCount);
+    }
+    if (
+      !this.smoothedFrequencyData ||
+      this.smoothedFrequencyData.length !== binCount
+    ) {
+      this.smoothedFrequencyData = new Float32Array(binCount);
+    }
+    if (
+      !this.boostedFrequencyData ||
+      this.boostedFrequencyData.length !== binCount
+    ) {
+      this.boostedFrequencyData = new Float32Array(binCount);
     }
 
-    return boostedData;
+    // Keep Lissajous buffers in sync too
+    if (!this._lissX || this._lissX.length !== binCount)
+      this._lissX = new Float32Array(binCount);
+    if (!this._lissY || this._lissY.length !== binCount)
+      this._lissY = new Float32Array(binCount);
+    this._lissOffset = (binCount * 0.25) | 0;
+  }
+
+  drawLissajous() {
+    if (!this.dataArray || this.dataArray.length === 0) return;
+    if (!this.canvas || !this.ctx) return;
+
+    const ctx = this.ctx;
+    const n = this.dataArray.length;
+    const w = this.canvas.width;
+    const h = this.canvas.height;
+
+    // Make the sensitivity slider meaningfully affect Lissajous
+    const sens = Number.isFinite(this.sensitivity) ? this.sensitivity : 1;
+    // Boost more than other modes, but clamp to keep it stable.
+    const sensMul = clamp(0.85 + sens * 0.55, 0.9, 2.1);
+
+    // Time-domain smoothing factor: stable when calm, slightly snappier when energetic.
+    const energy = this.visualEnergy || 0;
+    const alpha = 0.12 + energy * 0.18; // 0.12..0.30
+    const detail = this.behavior ? this.behavior.detailIntensityMultiplier : 1;
+    const step = detail < 0.95 ? 2 : 1; // small perf win on "low detail" profiles
+
+    // Preferred stereo would be L/R, but current graph is a single analyser.
+    // Fallback: pseudo-stereo via phase offset across the same buffer.
+    const off = this._lissOffset | 0 || (n * 0.25) | 0;
+
+    // Smooth into normalized [-1..1] buffers (no allocations)
+    for (let i = 0; i < n; i++) {
+      const xRaw = (this.dataArray[i] - 128) * (1 / 128);
+      const yRaw = (this.dataArray[(i + off) % n] - 128) * (1 / 128);
+      this._lissX[i] += (xRaw - this._lissX[i]) * alpha;
+      this._lissY[i] += (yRaw - this._lissY[i]) * alpha;
+    }
+
+    // Visual styling (single stroke, oscilloscope feel)
+    const hue = ((this.hueOffset || 0) + 200) % 360;
+    const lightness = 54 + energy * 10;
+    const a = 0.9;
+
+    ctx.save();
+    ctx.translate(w * 0.5, h * 0.5);
+
+    ctx.lineJoin = "round";
+    ctx.lineCap = "round";
+    ctx.strokeStyle = `hsla(${hue}, 85%, ${lightness}%, ${a})`;
+    ctx.lineWidth = (1.2 + energy * 2.8) * detail * (0.85 + sensMul * 0.35);
+
+    // Subtle glow; energy-driven but kept smooth by visualEnergy
+    ctx.shadowColor = `hsla(${hue}, 90%, 60%, 0.65)`;
+    ctx.shadowBlur = (8 + energy * 18) * (0.8 + sensMul * 0.35);
+
+    const scale =
+      0.44 * Math.min(w, h) * (0.92 + energy * 0.05) * (0.82 + sensMul * 0.28);
+
+    ctx.beginPath();
+    for (let i = 0; i < n; i += step) {
+      const x = this._lissX[i] * scale;
+      const y = this._lissY[i] * scale;
+      if (i === 0) ctx.moveTo(x, y);
+      else ctx.lineTo(x, y);
+    }
+    // Close the loop for a continuous shape (improves stability perception)
+    ctx.closePath();
+    ctx.stroke();
+
+    ctx.restore();
   }
 
   // Raindrop effect methods for Frequency 3x
   createRaindrop(x, y, width, height, value) {
+    const motion = this.behavior ? this.behavior.motionSpeedMultiplier : 1;
     const raindrop = {
       x: x + width / 2, // Center of the bar
       y: y + height, // Bottom of the bar
       width: Math.max(1, width * 0.3), // 30% of bar width, minimum 1px
       height: Math.max(2, height * 0.1), // 10% of bar height, minimum 2px
-      speed: 1.5 + (value / 255) * 2.5, // Reduced speed from 2-5 to 1.5-4 for longer duration
+      // Rhythm influences motion speed continuously (no pulses)
+      speed: (1.5 + (value / 255) * 2.5) * motion,
       alpha: 0.8, // Initial opacity
       value: value, // Store frequency value for color
     };
@@ -855,6 +1764,7 @@ class AudioVisualizer {
   }
 
   updateRaindrops() {
+    const decay = this.behavior ? this.behavior.decayRateMultiplier : 1;
     for (let i = this.raindrops.length - 1; i >= 0; i--) {
       const raindrop = this.raindrops[i];
 
@@ -862,7 +1772,8 @@ class AudioVisualizer {
       raindrop.y += raindrop.speed;
 
       // Fade out more slowly for longer duration
-      raindrop.alpha -= 0.005; // Reduced from 0.01 to 0.005 for longer visibility
+      // Rhythm influences decay continuously (higher BPM/beatEnv => slightly faster fade)
+      raindrop.alpha -= 0.005 * decay; // Reduced from 0.01 to 0.005 for longer visibility
 
       // Remove raindrops that are off canvas or fully transparent
       if (raindrop.y > this.canvas.height || raindrop.alpha <= 0) {
@@ -874,7 +1785,7 @@ class AudioVisualizer {
   drawRaindrops() {
     this.raindrops.forEach((raindrop) => {
       // Color based on frequency value (same as bars)
-      const hue = raindrop.value + 200;
+      const hue = this.getHue(raindrop.value);
       const saturation = 70;
       const lightness = 50;
 
@@ -889,11 +1800,11 @@ class AudioVisualizer {
         raindrop.x + raindrop.width,
         raindrop.y,
         raindrop.x + raindrop.width,
-        raindrop.y + radius
+        raindrop.y + radius,
       );
       this.ctx.lineTo(
         raindrop.x + raindrop.width,
-        raindrop.y + raindrop.height
+        raindrop.y + raindrop.height,
       );
       this.ctx.lineTo(raindrop.x, raindrop.y + raindrop.height);
       this.ctx.lineTo(raindrop.x, raindrop.y + radius);
@@ -901,7 +1812,7 @@ class AudioVisualizer {
         raindrop.x,
         raindrop.y,
         raindrop.x + radius,
-        raindrop.y
+        raindrop.y,
       );
       this.ctx.closePath();
       this.ctx.fill();
@@ -913,7 +1824,9 @@ class AudioVisualizer {
     if (!this.canvas) return;
     if (!this.frequencyData || this.frequencyData.length === 0) return;
 
-    this.ctx.lineWidth = 4;
+    const detail = this.behavior ? this.behavior.detailIntensityMultiplier : 1;
+    // Rhythm/detail gently modulates thickness (continuous, no pulses)
+    this.ctx.lineWidth = 4 * detail;
     const sliceWidth = this.canvas.width / this.dataArray.length;
 
     // Draw main waveform with amplitude-based colors
@@ -929,7 +1842,11 @@ class AudioVisualizer {
       const mappedFreqValue = Math.floor(amplitudeRatio * 255);
 
       // Create color based on amplitude (like frequency bars)
-      const hue = mappedFreqValue * this.sensitivity + 200; // Same formula as frequency bars
+      const colorShift = this.behavior ? this.behavior.colorShift : 0;
+      const hue = this.getHue(
+        mappedFreqValue * this.sensitivity,
+        colorShift * 10,
+      );
       const saturation = 70 + Math.abs(v) * 20; // Higher saturation for louder parts
       const lightness = 50 + Math.abs(v) * 30; // Brighter for louder parts
 
@@ -956,7 +1873,11 @@ class AudioVisualizer {
       const mappedFreqValue = Math.floor(amplitudeRatio * 255);
 
       // Create complementary color with transparency (same hue as main waveform)
-      const hue = mappedFreqValue * this.sensitivity + 200; // Same formula as frequency bars
+      const colorShift = this.behavior ? this.behavior.colorShift : 0;
+      const hue = this.getHue(
+        mappedFreqValue * this.sensitivity,
+        colorShift * 10,
+      );
       const saturation = 70 + Math.abs(v) * 15;
       const lightness = 40 + Math.abs(v) * 25;
       const alpha = 0.4 + Math.abs(v) * 0.3; // More transparent for quieter parts
@@ -982,15 +1903,19 @@ class AudioVisualizer {
     const radius = Math.min(centerX, centerY) * 0.6;
 
     this.ctx.strokeStyle = "#ff6b6b";
-    this.ctx.lineWidth = 3;
+    const detail = this.behavior ? this.behavior.detailIntensityMultiplier : 1;
+    this.ctx.lineWidth = 3 * detail;
 
     // Draw multiple circles based on frequency data
     for (let i = 0; i < this.frequencyData.length; i += 4) {
       const value = this.frequencyData[i] * this.sensitivity;
-      const currentRadius = radius + (value / 255) * 100;
+      // Rhythm/detail slightly increases radius responsiveness (continuous)
+      const currentRadius = radius + (value / 255) * (100 * detail);
       const alpha = (value / 255) * 0.8 + 0.2;
 
-      this.ctx.strokeStyle = `hsla(${value + 200}, 70%, 60%, ${alpha})`;
+      const colorShift = this.behavior ? this.behavior.colorShift : 0;
+      const hue = this.getHue(value, colorShift * 10);
+      this.ctx.strokeStyle = `hsla(${hue}, 70%, 60%, ${alpha})`;
       this.ctx.lineWidth = (value / 255) * 5 + 1;
 
       this.ctx.beginPath();
@@ -999,214 +1924,200 @@ class AudioVisualizer {
     }
   }
 
-  // New: mirrored frequency bars centered on canvas
-  drawFrequencyBars2x() {
-    if (!this.frequencyData || this.frequencyData.length === 0) return;
-    if (!this.canvas) return;
-
-    const data =
-      this.boostedFrequencyData ||
-      (this.smoothedFrequencyData &&
+  // Prefer boosted -> smoothed -> raw frequency data for visualizations
+  getVizSpectrum() {
+    if (this.boostedFrequencyData) return this.boostedFrequencyData;
+    if (
+      this.smoothedFrequencyData &&
+      this.frequencyData &&
       this.smoothedFrequencyData.length === this.frequencyData.length
-        ? this.smoothedFrequencyData
-        : this.frequencyData);
+    ) {
+      return this.smoothedFrequencyData;
+    }
+    return this.frequencyData;
+  }
 
+  // Global hue helper (keeps rainbow behavior; rotates palette via this.hueOffset)
+  getHue(value, extra = 0) {
+    const base = (this.hueOffset || 0) + (value || 0) + (extra || 0);
+    const h = base % 360;
+    return h < 0 ? h + 360 : h;
+  }
+
+  // Draw a single rounded bar with flat color (rounded top only)
+  drawRoundedBarFlat(x, y, width, height, value, radius) {
+    const ctx = this.ctx;
+    ctx.fillStyle = `hsl(${this.getHue(value)}, 70%, 50%)`;
+    const w = width;
+    const h = height;
+    const r = Math.min(radius, w / 2, h / 2);
+    ctx.beginPath();
+    ctx.moveTo(x + r, y);
+    ctx.lineTo(x + w - r, y);
+    ctx.quadraticCurveTo(x + w, y, x + w, y + r);
+    ctx.lineTo(x + w, y + h);
+    ctx.lineTo(x, y + h);
+    ctx.lineTo(x, y + r);
+    ctx.quadraticCurveTo(x, y, x + r, y);
+    ctx.closePath();
+    ctx.fill();
+  }
+
+  // Unified bar renderer for all bar-based visual modes
+  drawBars(config) {
+    const canvas = this.canvas;
+    const ctx = this.ctx;
+    const data = this.getVizSpectrum();
+    if (!canvas || !ctx || !data || data.length === 0) return;
+
+    const behavior = this.behavior;
+    const detail = behavior ? behavior.detailIntensityMultiplier : 1;
+    // IMPORTANT: some modes must have perfectly stable x-geometry.
+    // Locking x disables any time-varying spacing/width modifiers.
+    const lockX = !!config.lockX;
+    const spacingScale = !lockX && behavior ? behavior.barSpacingScale : 1;
+    const widthScale = !lockX && behavior ? behavior.barWidthScale : 1;
+    const heightScale = behavior ? behavior.barHeightScale : 1;
+
+    const w = canvas.width;
+    const h = canvas.height;
     const totalBars = data.length;
-    const centerX = this.canvas.width / 2;
+    const centerX = w / 2;
+    const centerY = h / 2;
 
-    // Each side uses half the canvas width for all bins
-    const perSideSpacing = this.canvas.width / 2 / totalBars;
-    const barWidth = perSideSpacing + 5; // Expand width by 5px
-    const barHeight = this.canvas.height * 0.8;
+    const barHeight = h * config.barHeightScale * heightScale;
 
+    // Layout-specific spacing/width (keeps exact prior proportions)
+    const perSpacing =
+      (w / 2 / totalBars) *
+      spacingScale; /* both mirrored and center-out use half-width */
+    const widthPad = config.layout === "center-out" ? 4 : 5;
+    const barWidth = (perSpacing + widthPad) * widthScale;
     const radius = Math.max(2, Math.min(6, barWidth * 0.3));
 
-    // Helper to draw a single rounded bar with flat color (rounded top only)
-    const drawRoundedBarFlat = (x, y, width, height, value) => {
-      this.ctx.fillStyle = `hsl(${value + 200}, 70%, 50%)`;
-      const w = width;
-      const h = height;
-      const r = Math.min(radius, w / 2, h / 2);
-      this.ctx.beginPath();
-      this.ctx.moveTo(x + r, y);
-      this.ctx.lineTo(x + w - r, y);
-      this.ctx.quadraticCurveTo(x + w, y, x + w, y + r);
-      this.ctx.lineTo(x + w, y + h);
-      this.ctx.lineTo(x, y + h);
-      this.ctx.lineTo(x, y + r);
-      this.ctx.quadraticCurveTo(x, y, x + r, y);
-      this.ctx.closePath();
-      this.ctx.fill();
-    };
+    const responseScale = this.sensitivity * (1 + (detail - 1) * 0.35);
+    const now = config.enableRaindrops ? Date.now() : 0;
+    const time =
+      config.layout === "center-out" && !lockX
+        ? (this.lastFrameTime || 0) * 0.001
+        : 0;
 
     for (let i = 0; i < totalBars; i++) {
-      const value = data[i] * this.sensitivity;
+      const value = data[i] * responseScale;
       const height = (value / 255) * barHeight;
-      const y = this.canvas.height - height; // Bars start from bottom
 
-      // Right side - center bar in its spacing
-      const xRight =
-        centerX + i * perSideSpacing + (perSideSpacing - barWidth) / 2;
-      drawRoundedBarFlat(xRight, y, barWidth, height, value);
+      if (config.layout === "mirrored") {
+        const y = config.origin === "top" ? 0 : h - height;
 
-      // Left side (mirrored) - center bar in its spacing
-      const xLeft =
-        centerX - (i + 1) * perSideSpacing + (perSideSpacing - barWidth) / 2;
-      drawRoundedBarFlat(xLeft, y, barWidth, height, value);
+        // Deterministic x positions (no time-based drift)
+        const xRight = centerX + i * perSpacing + (perSpacing - barWidth) / 2;
+        const xLeft =
+          centerX - (i + 1) * perSpacing + (perSpacing - barWidth) / 2;
+
+        this.drawRoundedBarFlat(xRight, y, barWidth, height, value, radius);
+        this.drawRoundedBarFlat(xLeft, y, barWidth, height, value, radius);
+
+        if (config.enableRaindrops && height > 15) {
+          if (!this.barRaindropTimers[i]) this.barRaindropTimers[i] = 0;
+          if (now - this.barRaindropTimers[i] > this.raindropInterval) {
+            this.createRaindrop(xRight, y, barWidth, height, value);
+            this.createRaindrop(xLeft, y, barWidth, height, value);
+            this.barRaindropTimers[i] = now;
+          }
+        }
+      } else if (config.layout === "center-out") {
+        // 4x: bars expand from center in all 4 quadrants (preserves 0.5px overlap)
+        // Optional subtle horizontal wobble (intentionally scoped to 4x only)
+        const wobbleAmount =
+          !lockX && typeof config.xWobbleAmount === "number"
+            ? config.xWobbleAmount
+            : 0;
+        const wobbleSpeed =
+          !lockX && typeof config.xWobbleSpeed === "number"
+            ? config.xWobbleSpeed
+            : 0;
+        const wobblePhase =
+          !lockX && typeof config.xWobblePhase === "number"
+            ? config.xWobblePhase
+            : 0.1;
+        const xWobble = wobbleAmount
+          ? Math.sin(time * wobbleSpeed + i * wobblePhase) * wobbleAmount
+          : 0;
+
+        const xRight =
+          centerX + i * perSpacing + (perSpacing - barWidth) / 2 + xWobble;
+        const xLeft =
+          centerX -
+          (i + 1) * perSpacing +
+          (perSpacing - barWidth) / 2 -
+          xWobble;
+
+        const yTop = centerY - height;
+        const yBottom = centerY - 0.5;
+
+        this.drawRoundedBarFlat(xRight, yTop, barWidth, height, value, radius);
+        this.drawRoundedBarFlat(xLeft, yTop, barWidth, height, value, radius);
+        this.drawRoundedBarFlat(
+          xRight,
+          yBottom,
+          barWidth,
+          height,
+          value,
+          radius,
+        );
+        this.drawRoundedBarFlat(
+          xLeft,
+          yBottom,
+          barWidth,
+          height,
+          value,
+          radius,
+        );
+      }
     }
+
+    if (config.enableRaindrops) {
+      this.updateRaindrops();
+      this.drawRaindrops();
+    }
+  }
+
+  // New: mirrored frequency bars centered on canvas
+  drawFrequencyBars2x() {
+    this.drawBars({
+      layout: "mirrored",
+      origin: "bottom",
+      barHeightScale: 0.8,
+      enableRaindrops: false,
+      lockX: true,
+    });
   }
 
   // New: Frequency 3x - Frequency 2x flipped vertically (bars start from top)
   drawFrequencyBars3x() {
-    if (!this.frequencyData || this.frequencyData.length === 0) return;
-    if (!this.canvas) return;
-
-    const data =
-      this.boostedFrequencyData ||
-      (this.smoothedFrequencyData &&
-      this.smoothedFrequencyData.length === this.frequencyData.length
-        ? this.smoothedFrequencyData
-        : this.frequencyData);
-
-    const totalBars = data.length;
-    const centerX = this.canvas.width / 2;
-
-    // Each side uses half the canvas width for all bins
-    const perSideSpacing = this.canvas.width / 2 / totalBars;
-    const barWidth = perSideSpacing + 5; // Expand width by 5px
-    const barHeight = this.canvas.height * 0.35; // Reduced from 0.5 to 0.35 for more raindrop focus
-
-    const radius = Math.max(2, Math.min(6, barWidth * 0.3));
-
-    // Helper to draw a single rounded bar with flat color (rounded top only)
-    const drawRoundedBarFlat = (x, y, width, height, value) => {
-      this.ctx.fillStyle = `hsl(${value + 200}, 70%, 50%)`;
-      const w = width;
-      const h = height;
-      const r = Math.min(radius, w / 2, h / 2);
-      this.ctx.beginPath();
-      this.ctx.moveTo(x + r, y);
-      this.ctx.lineTo(x + w - r, y);
-      this.ctx.quadraticCurveTo(x + w, y, x + w, y + r);
-      this.ctx.lineTo(x + w, y + h);
-      this.ctx.lineTo(x, y + h);
-      this.ctx.lineTo(x, y + r);
-      this.ctx.quadraticCurveTo(x, y, x + r, y);
-      this.ctx.closePath();
-      this.ctx.fill();
-    };
-
-    for (let i = 0; i < totalBars; i++) {
-      const value = data[i] * this.sensitivity;
-      const height = (value / 255) * barHeight * 0.6; // Reduced to 60% of original height for more compact bars
-
-      // Vertical flip: bars start from top and grow downward (opposite of 2x)
-      const y = 0; // Bars are anchored to top of canvas (y=0)
-
-      // Same positioning as Frequency 2x: bars grow from edges toward center
-      const xRight =
-        centerX + i * perSideSpacing + (perSideSpacing - barWidth) / 2;
-      drawRoundedBarFlat(xRight, y, barWidth, height, value);
-
-      // Left side (mirrored) - same as Frequency 2x
-      const xLeft =
-        centerX - (i + 1) * perSideSpacing + (perSideSpacing - barWidth) / 2;
-      drawRoundedBarFlat(xLeft, y, barWidth, height, value);
-
-      // Create raindrops for active bars (when height is significant) - even distribution across all bars
-      if (height > 15) {
-        // Initialize timers array if needed
-        if (!this.barRaindropTimers[i]) {
-          this.barRaindropTimers[i] = 0;
-        }
-
-        // Check if enough time has passed for this specific bar position
-        if (Date.now() - this.barRaindropTimers[i] > this.raindropInterval) {
-          this.createRaindrop(xRight, y, barWidth, height, value);
-          this.createRaindrop(xLeft, y, barWidth, height, value);
-          this.barRaindropTimers[i] = Date.now();
-        }
-      }
-    }
-
-    // Update and draw raindrops
-    this.updateRaindrops();
-    this.drawRaindrops();
+    // Old behavior: (canvas.height * 0.35 * heightScale) then * 0.6 on height
+    this.drawBars({
+      layout: "mirrored",
+      origin: "top",
+      barHeightScale: 0.35 * 0.6,
+      enableRaindrops: true,
+      lockX: true,
+    });
   }
 
   // New: 4-quadrant frequency bars centered on canvas
   drawFrequencyBars4x() {
-    if (!this.frequencyData || this.frequencyData.length === 0) return;
-    if (!this.canvas) return;
-
-    const data =
-      this.boostedFrequencyData ||
-      (this.smoothedFrequencyData &&
-      this.smoothedFrequencyData.length === this.frequencyData.length
-        ? this.smoothedFrequencyData
-        : this.frequencyData);
-
-    const totalBars = data.length;
-    const centerX = this.canvas.width / 2;
-    const centerY = this.canvas.height / 2;
-
-    // Each quadrant uses a quarter of the canvas space
-    const perQuadrantSpacing = this.canvas.width / 2 / totalBars; // Use half canvas width per side for more coverage
-    const barWidth = perQuadrantSpacing + 4; // Increase bar width by 4px total (2px + 2px)
-    const maxBarHeight = this.canvas.height / 3; // Increase height to use more vertical space
-
-    const radius = Math.max(2, Math.min(6, barWidth * 0.3));
-
-    // Helper to draw a single rounded bar with flat color (rounded top only)
-    const drawRoundedBarFlat = (x, y, width, height, value) => {
-      this.ctx.fillStyle = `hsl(${value + 200}, 70%, 50%)`;
-      const w = width;
-      const h = height;
-      const r = Math.min(radius, w / 2, h / 2);
-      this.ctx.beginPath();
-      this.ctx.moveTo(x + r, y);
-      this.ctx.lineTo(x + w - r, y);
-      this.ctx.quadraticCurveTo(x + w, y, x + w, y + r);
-      this.ctx.lineTo(x + w, y + h);
-      this.ctx.lineTo(x, y + h);
-      this.ctx.lineTo(x, y + r);
-      this.ctx.quadraticCurveTo(x, y, x + r, y);
-      this.ctx.closePath();
-      this.ctx.fill();
-    };
-
-    for (let i = 0; i < totalBars; i++) {
-      const value = data[i] * this.sensitivity;
-      const height = (value / 255) * maxBarHeight;
-
-      // Top-right quadrant
-      const xTopRight =
-        centerX + i * perQuadrantSpacing + (perQuadrantSpacing - barWidth) / 2;
-      const yTopRight = centerY - height;
-      drawRoundedBarFlat(xTopRight, yTopRight, barWidth, height, value);
-
-      // Top-left quadrant (mirror of top-right)
-      const xTopLeft =
-        centerX -
-        (i + 1) * perQuadrantSpacing +
-        (perQuadrantSpacing - barWidth) / 2;
-      const yTopLeft = centerY - height;
-      drawRoundedBarFlat(xTopLeft, yTopLeft, barWidth, height, value);
-
-      // Bottom-right quadrant (x-axis flip) - overlap by 0.5px for seamless connection
-      const xBottomRight =
-        centerX + i * perQuadrantSpacing + (perQuadrantSpacing - barWidth) / 2;
-      const yBottomRight = centerY - 0.5; // Overlap by 0.5px
-      drawRoundedBarFlat(xBottomRight, yBottomRight, barWidth, height, value);
-
-      // Bottom-left quadrant (x-axis flip, y-axis mirror) - overlap by 0.5px for seamless connection
-      const xBottomLeft =
-        centerX -
-        (i + 1) * perQuadrantSpacing +
-        (perQuadrantSpacing - barWidth) / 2;
-      const yBottomLeft = centerY - 0.5; // Overlap by 0.5px
-      drawRoundedBarFlat(xBottomLeft, yBottomLeft, barWidth, height, value);
-    }
+    this.drawBars({
+      layout: "center-out",
+      origin: "center",
+      barHeightScale: 1 / 3,
+      enableRaindrops: false,
+      // Keep style-driven geometry + allow optional intentional wobble (defaults to 0)
+      lockX: false,
+      xWobbleAmount: 0,
+      xWobbleSpeed: 0,
+      xWobblePhase: 0.1,
+    });
   }
 
   // New: Circles visualization - multiple circles positioned around canvas with trailing effects
@@ -1223,17 +2134,26 @@ class AudioVisualizer {
 
     const centerX = this.canvas.width / 2;
     const centerY = this.canvas.height / 2;
-    const maxRadius = Math.min(centerX, centerY) * 0.8;
+    const radiusScale = this.behavior ? this.behavior.circlesRadiusScale : 1;
+    const sizeScale = this.behavior ? this.behavior.circlesSizeScale : 1;
+    const trailScale = this.behavior ? this.behavior.circlesTrailScale : 1;
+    const motion = this.behavior ? this.behavior.motionSpeedMultiplier : 1;
+    const maxRadius = Math.min(centerX, centerY) * 0.8 * radiusScale;
 
     // Create circle positions around the canvas
     const circleCount = Math.min(data.length, 64); // Limit to 64 circles for performance
     const angleStep = (2 * Math.PI) / circleCount;
 
-    // Initialize or update previous positions for trailing effect
-    if (!this.previousCirclePositions) {
-      this.previousCirclePositions = new Array(circleCount);
-      for (let i = 0; i < circleCount; i++) {
-        this.previousCirclePositions[i] = { x: centerX, y: centerY };
+    // Previous positions for trailing effect (typed array, no per-frame object allocations)
+    const needed = circleCount * 2;
+    if (
+      !this.previousCirclePositions ||
+      this.previousCirclePositions.length !== needed
+    ) {
+      this.previousCirclePositions = new Float32Array(needed);
+      for (let i = 0; i < needed; i += 2) {
+        this.previousCirclePositions[i] = centerX;
+        this.previousCirclePositions[i + 1] = centerY;
       }
     }
 
@@ -1242,33 +2162,40 @@ class AudioVisualizer {
       const angle = i * angleStep;
 
       // Calculate circle position in a spiral pattern
-      const distance = (value / 255) * maxRadius;
+      // Rhythm slightly increases "movement amplitude" (continuous modulation)
+      const distance = (value / 255) * maxRadius * (0.97 + 0.03 * motion);
       const x = centerX + Math.cos(angle) * distance;
       const y = centerY + Math.sin(angle) * distance;
 
       // Store current position for next frame
-      const prevPos = this.previousCirclePositions[i];
-      this.previousCirclePositions[i] = { x, y };
+      const baseIdx = i * 2;
+      const prevX = this.previousCirclePositions[baseIdx];
+      const prevY = this.previousCirclePositions[baseIdx + 1];
+      this.previousCirclePositions[baseIdx] = x;
+      this.previousCirclePositions[baseIdx + 1] = y;
 
       // Circle size based on frequency value
-      const circleSize = (value / 255) * 8 + 2; // 2px to 10px
+      const circleSize = ((value / 255) * 8 + 2) * sizeScale; // style-aware size
 
       // Color based on frequency value (like other visualizations)
-      const hue = value + 200;
+      const hue = this.getHue(value);
       const saturation = 70 + (value / 255) * 20; // 70% to 90%
       const lightness = 50 + (value / 255) * 30; // 50% to 80%
 
       // Draw trailing effect (fading trail)
-      if (prevPos && (prevPos.x !== x || prevPos.y !== y)) {
+      if (prevX !== x || prevY !== y) {
         const trailLength = Math.min(
           20,
-          Math.sqrt((x - prevPos.x) ** 2 + (y - prevPos.y) ** 2)
+          Math.sqrt((x - prevX) ** 2 + (y - prevY) ** 2),
         );
-        const trailSteps = Math.min(10, Math.floor(trailLength / 2));
+        const trailSteps = Math.min(
+          10,
+          Math.floor((trailLength / 2) * trailScale),
+        );
 
         for (let step = 1; step <= trailSteps; step++) {
-          const trailX = prevPos.x + (x - prevPos.x) * (step / trailSteps);
-          const trailY = prevPos.y + (y - prevPos.y) * (step / trailSteps);
+          const trailX = prevX + (x - prevX) * (step / trailSteps);
+          const trailY = prevY + (y - prevY) * (step / trailSteps);
           const trailAlpha = 0.3 * (1 - step / trailSteps); // Fade out trail
           const trailSize = circleSize * (1 - (step / trailSteps) * 0.5); // Shrink trail
 
@@ -1286,7 +2213,11 @@ class AudioVisualizer {
       this.ctx.fill();
 
       // Add glow effect for brighter circles
-      if (value > 128) {
+      // Style-aware glow threshold: calmer tracks glow a bit sooner, energetic tracks need stronger peaks.
+      const glowThreshold = this.behavior
+        ? 110 + (1 - this.visualEnergy) * 20
+        : 128;
+      if (value > glowThreshold) {
         this.ctx.shadowColor = `hsl(${hue}, ${saturation}%, ${lightness}%)`;
         this.ctx.shadowBlur = circleSize * 2;
         this.ctx.fill();
@@ -1295,240 +2226,244 @@ class AudioVisualizer {
     }
   }
 
-  // New: Starlight visualization - stationary circles scattered like stars in night sky
-  drawStarlight() {
-    if (!this.frequencyData || this.frequencyData.length === 0) return;
+  initParticleFlowPool() {
     if (!this.canvas) return;
 
-    const data =
-      this.boostedFrequencyData ||
-      (this.smoothedFrequencyData &&
-      this.smoothedFrequencyData.length === this.frequencyData.length
-        ? this.smoothedFrequencyData
-        : this.frequencyData);
+    // Clamp particle count to a safe range for performance.
+    const desiredCount = this.particleFlowCount || 120;
+    const count = Math.max(60, Math.min(140, desiredCount));
+    this.particleFlowCount = count;
+    const w = this.canvas.width || 1200;
+    const h = this.canvas.height || 800;
+    const cx = w * 0.5;
+    const cy = h * 0.5;
+    const minDim = Math.min(w, h);
+    const tau = Math.PI * 2;
 
-    // Check if canvas size has changed and regenerate stars if needed
-    const currentCanvasSize = `${this.canvas.width}x${this.canvas.height}`;
-    if (!this.starPositions || this.lastCanvasSize !== currentCanvasSize) {
-      this.starPositions = [];
-      this.starSizes = [];
-      this.lastCanvasSize = currentCanvasSize;
-      const starCount = Math.min(data.length, 128); // More stars for a richer night sky
-
-      // Helper function to check if a position overlaps with existing stars
-      const isOverlapping = (x, y, size) => {
-        for (const existingStar of this.starPositions) {
-          const distance = Math.sqrt(
-            (x - existingStar.x) ** 2 + (y - existingStar.y) ** 2
-          );
-          const minDistance = (size + existingStar.size) * 1.5; // 1.5x spacing for better separation
-          if (distance < minDistance) return true;
-        }
-        return false;
-      };
-
-      for (let i = 0; i < starCount; i++) {
-        let attempts = 0;
-        let x, y, size;
-
-        // Keep trying until we find a non-overlapping position
-        do {
-          x = Math.random() * (this.canvas.width - 100) + 50;
-          y = Math.random() * (this.canvas.height - 100) + 50;
-          size = Math.random() * 3 + 1;
-          attempts++;
-        } while (isOverlapping(x, y, size) && attempts < 100);
-
-        // If we couldn't find a non-overlapping position, use the last attempt
-        this.starPositions.push({ x, y, size });
-        this.starSizes.push(size);
+    if (
+      !this.particleFlowParticles ||
+      this.particleFlowParticles.length !== count
+    ) {
+      // Create a fixed-size pool; objects are reused and never reallocated per-frame.
+      this.particleFlowParticles = new Array(count);
+      for (let i = 0; i < count; i++) {
+        this.particleFlowParticles[i] = {
+          x: cx,
+          y: cy,
+          vx: 0,
+          vy: 0,
+          life: 0,
+          alpha: 0.2,
+          // Stable per-particle seed drives variation without extra allocations.
+          seed: i * 0.61803398875,
+          hueOffset: (i * 17) % 360,
+        };
       }
     }
 
-    // Draw each star
-    for (let i = 0; i < this.starPositions.length; i++) {
-      const star = this.starPositions[i];
-      const baseSize = this.starSizes[i];
-      const value = data[i % data.length] * this.sensitivity; // Cycle through frequency data
+    for (let i = 0; i < count; i++) {
+      const p = this.particleFlowParticles[i];
+      const angle = (i / count) * tau;
+      const band = (i % 23) / 23;
+      const radius = minDim * (0.08 + band * 0.36);
+      const twist = 0.8 + (i % 7) * 0.17;
 
-      // Calculate star brightness and size based on frequency
-      const brightness = value / 255;
-      const starSize = baseSize + brightness * 3; // Size increases with brightness
-
-      // More vibrant colors with higher saturation and contrast
-      const hue = value + 200;
-      const saturation = 85 + brightness * 15; // 85% to 100% (more vibrant)
-      const lightness = 25 + brightness * 55; // 25% to 80% (more contrast)
-
-      // Draw star with varying opacity based on brightness
-      const alpha = 0.4 + brightness * 0.6; // 40% to 100% opacity (more visible)
-      this.ctx.fillStyle = `hsla(${hue}, ${saturation}%, ${lightness}%, ${alpha})`;
-
-      this.ctx.beginPath();
-      this.ctx.arc(star.x, star.y, starSize, 0, 2 * Math.PI);
-      this.ctx.fill();
-
-      // Add glow effect for brighter stars
-      if (brightness > 0.5) {
-        this.ctx.shadowColor = `hsl(${hue}, ${saturation}%, ${lightness}%)`;
-        this.ctx.shadowBlur = starSize * 2;
-        this.ctx.fill();
-        this.ctx.shadowBlur = 0; // Reset shadow
-      }
-
-      // Add twinkling effect for very bright stars
-      if (brightness > 0.8) {
-        this.ctx.fillStyle = `hsla(${hue}, ${saturation}%, 95%, ${
-          brightness * 0.7
-        })`;
-        this.ctx.beginPath();
-        this.ctx.arc(star.x, star.y, starSize * 0.5, 0, 2 * Math.PI);
-        this.ctx.fill();
-      }
+      p.x = cx + Math.cos(angle * 1.7 + p.seed) * radius * twist * 0.55;
+      p.y = cy + Math.sin(angle * 1.3 + p.seed * 0.9) * radius * twist * 0.55;
+      p.vx = Math.cos(angle + p.seed) * 0.2;
+      p.vy = Math.sin(angle + p.seed * 1.1) * 0.2;
+      p.life = (i % 100) / 100;
+      // Base alpha is light; final alpha is modulated during draw.
+      p.alpha = 0.15 + (i % 10) * 0.02;
     }
+
+    this._particleFlowFrame = 0;
   }
 
-  // Xbox-style Retro Box visualizer
-  drawRetroBox() {
+  respawnParticleFlowParticle(p, index, frame, cx, cy, minDim) {
+    const tau = Math.PI * 2;
+    const seed = p.seed + index * 0.137 + frame * 0.0017;
+    const angle = (seed % 1) * tau;
+    const radius = minDim * (0.08 + ((index % 11) / 11) * 0.28);
+    const offsetX = Math.cos(angle) * radius;
+    const offsetY = Math.sin(angle) * radius;
+    const drift = 0.35 + (index % 7) * 0.06;
+
+    p.x = cx + offsetX;
+    p.y = cy + offsetY;
+    // Give a gentle outward drift without extra trig at runtime.
+    p.vx = Math.cos(angle) * drift;
+    p.vy = Math.sin(angle) * drift;
+    p.alpha = 0.18 + (index % 8) * 0.02;
+    p.life = seed % 1;
+  }
+
+  drawParticleFlow() {
+    if (!this.canvas || !this.ctx) return;
+    if (
+      !this.particleFlowParticles ||
+      this.particleFlowParticles.length === 0
+    ) {
+      this.initParticleFlowPool();
+    }
+    if (!this.particleFlowParticles || this.particleFlowParticles.length === 0)
+      return;
+
     const ctx = this.ctx;
-    const width = this.canvas.width;
-    const height = this.canvas.height;
+    const w = this.canvas.width;
+    const h = this.canvas.height;
+    const cx = w * 0.5;
+    const cy = h * 0.5;
+    const particles = this.particleFlowParticles;
+    const behavior = this.behavior;
+    const lowEnergy = this.energyNorm ? clamp01(this.energyNorm.lowNorm) : 0;
+    const midEnergy = this.energyNorm ? clamp01(this.energyNorm.midNorm) : 0;
+    const highEnergy = this.energyNorm ? clamp01(this.energyNorm.highNorm) : 0;
+    const motion = behavior ? behavior.motionSpeedMultiplier : 1;
+    const detail = behavior ? behavior.detailIntensityMultiplier : 1;
+    const colorShift = behavior ? behavior.colorShift : 0;
+    const beatEnv = behavior ? clamp01(behavior.beatEnv) : 0;
+    const frame = this._particleFlowFrame++;
+    const tau = Math.PI * 2;
+    // Beat envelope adds a smooth directional "surge" (no impulses).
+    const beatSwirlBoost = 1 + beatEnv * 1.55;
+    const beatOutBoost = 1 + beatEnv * 1.15;
+    const swirlForce = (0.004 + midEnergy * 0.11) * motion * beatSwirlBoost;
+    const outwardForce = (0.02 + lowEnergy * 0.18) * motion * beatOutBoost;
+    const jitterForce = (0.001 + highEnergy * 0.035) * (0.85 + detail * 0.15);
+    const maxSpeed = 3.2 + lowEnergy * 1.6 + midEnergy * 1.1 + highEnergy * 0.8;
+    const minDim = Math.min(cx, cy);
+    const maxSpeedSq = maxSpeed * maxSpeed;
+    const offscreenLimit = Math.max(40, minDim * 0.18);
+    const respawnLimitX = cx * 2 + offscreenLimit;
+    const respawnLimitY = cy * 2 + offscreenLimit;
 
-    // Clear canvas with dark background
-    ctx.fillStyle = "rgba(0, 0, 0, 0.15)";
-    ctx.fillRect(0, 0, width, height);
+    // Cache style components that are shared across particles.
+    const baseHueOffset =
+      this.hueOffset +
+      colorShift * 80 +
+      lowEnergy * 28 +
+      midEnergy * 90 +
+      highEnergy * 135;
+    const saturation = 78;
 
-    // Get frequency data (prioritize boosted data)
-    const data =
-      this.boostedFrequencyData ||
-      this.smoothedFrequencyData ||
-      this.frequencyData;
-    if (!data || data.length === 0) return;
+    const minDimSafe = Math.max(1, minDim);
 
-    // Xbox-style parameters
-    const barHeight = height * 0.8;
-    const barWidth = 8;
-    const spacing = 4;
-    const centerY = height / 2;
-    const maxBars = Math.floor(width / (barWidth + spacing));
-
-    // Create wave motion effect
-    const time = Date.now() * 0.001;
-    const waveSpeed = 2;
-    const waveAmplitude = 20;
-
-    // Classic old-school car dashboard green color
-    const classicCarGreen = {
-      primary: "#39ff14", // Bright phosphor green (like old car dashboards)
-      secondary: "#32cd32", // Lime green
-      accent: "#ffffff", // White for highlights
+    // Local helpers to reduce allocations in the hot path.
+    const hslaCache = this._hslaCache;
+    const hslaCacheMax = this._hslaCacheMax || 2048;
+    const getCachedHsla = (hueInt, satInt, lightInt, alphaBucket) => {
+      // alphaBucket is an integer 0..100, representing alpha in steps of 0.01.
+      // This slightly quantizes alpha but is visually indistinguishable and cuts string churn.
+      const key =
+        (hueInt & 511) +
+        "|" +
+        satInt +
+        "|" +
+        lightInt +
+        "|" +
+        alphaBucket;
+      let v = hslaCache.get(key);
+      if (v) return v;
+      v = `hsla(${hueInt}, ${satInt}%, ${lightInt}%, ${alphaBucket * 0.01})`;
+      hslaCache.set(key, v);
+      // Opportunistic cap to avoid unbounded memory growth.
+      if (hslaCache.size > hslaCacheMax) hslaCache.clear();
+      return v;
     };
 
-    // Use the classic car green instead of color cycling
-    const colors = classicCarGreen;
+    for (let i = 0; i < particles.length; i++) {
+      const p = particles[i];
+      const dx = p.x - cx;
+      const dy = p.y - cy;
+      const distSq = dx * dx + dy * dy + 0.001;
+      const invDist = 1 / Math.sqrt(distSq);
+      const radialX = dx * invDist;
+      const radialY = dy * invDist;
+      const tangentX = -radialY;
+      const tangentY = radialX;
 
-    // Draw horizontal bars in Xbox style
-    for (let i = 0; i < maxBars; i++) {
-      const x = i * (barWidth + spacing);
-      const dataIndex = Math.floor((i / maxBars) * data.length);
-      const value = data[dataIndex] || 0;
+      // Beat: gently increases coherence of the swirl (feels like a "direction change").
+      const swirlCoherence = 0.75 + (i % 5) * 0.05 + beatEnv * 0.12;
+      p.vx += radialX * outwardForce;
+      p.vy += radialY * outwardForce;
+      p.vx += tangentX * swirlForce * swirlCoherence;
+      p.vy += tangentY * swirlForce * swirlCoherence;
 
-      // Create wave motion
-      const waveOffset = Math.sin(time * waveSpeed + i * 0.1) * waveAmplitude;
-      const barLength = (value / 255) * barHeight * 0.6 + 10; // Minimum bar length
+      // Lightweight jitter: derived later from a single sin call (see below),
+      // avoids multiple trig calls per particle.
 
-      // Xbox-style bar positioning (centered, horizontal)
-      const startY = centerY - barLength / 2 + waveOffset;
-      const endY = centerY + barLength / 2 + waveOffset;
+      const centerPull = 0.00004 * (1 - lowEnergy);
+      p.vx -= dx * centerPull;
+      p.vy -= dy * centerPull;
 
-      // Create car dashboard-style gradient with classic green
-      const gradient = ctx.createLinearGradient(x, startY, x + barWidth, endY);
-      gradient.addColorStop(0, colors.primary); // Bright phosphor green
-      gradient.addColorStop(0.3, colors.secondary); // Lime green
-      gradient.addColorStop(0.7, colors.secondary); // Lime green
-      gradient.addColorStop(1, colors.primary); // Bright phosphor green again
+      p.vx *= 0.98;
+      p.vy *= 0.98;
 
-      // Draw main bar
-      ctx.fillStyle = gradient;
-      ctx.fillRect(x, startY, barWidth, barLength);
+      const speedSq = p.vx * p.vx + p.vy * p.vy;
+      if (speedSq > maxSpeedSq) {
+        const scale = maxSpeed / Math.sqrt(speedSq);
+        p.vx *= scale;
+        p.vy *= scale;
+      }
 
-      // Add car dashboard glow effect
-      ctx.shadowColor = colors.primary;
-      ctx.shadowBlur = 15;
-      ctx.fillRect(x, startY, barWidth, barLength);
+      p.x += p.vx;
+      p.y += p.vy;
 
-      // Reset shadow
-      ctx.shadowBlur = 0;
+      if (
+        p.x < -offscreenLimit ||
+        p.x > respawnLimitX ||
+        p.y < -offscreenLimit ||
+        p.y > respawnLimitY
+      ) {
+        this.respawnParticleFlowParticle(p, i, frame, cx, cy, minDim);
+        continue;
+      }
 
-      // Add highlight line (car dashboard signature)
-      ctx.fillStyle = colors.accent;
-      ctx.fillRect(x, startY, barWidth, 2);
+      p.life += 0.0025 + highEnergy * 0.003 + midEnergy * 0.0015;
+      if (p.life > 1) p.life -= 1;
 
-      // Add bottom accent line
-      ctx.fillStyle = colors.primary;
-      ctx.fillRect(x, endY - 2, barWidth, 2);
+      // Avoid a 2nd sqrt: dist = 1 / invDist.
+      const dist = 1 / invDist;
+      const centerMix = 1 - Math.min(1, dist / minDimSafe);
 
-      // Add subtle inner glow for that phosphor effect
-      ctx.fillStyle = `rgba(57, 255, 20, 0.4)`;
-      ctx.fillRect(x + 1, startY + 1, barWidth - 2, barLength - 2);
+      // Single trig call per particle: drives both pulse and subtle jitter.
+      const phase = p.life * tau + p.seed;
+      const s = Math.sin(phase);
+      const absS = s < 0 ? -s : s;
+
+      // Use the same sin result for a soft size/brightness pulse.
+      const pulse = 0.88 + 0.12 * absS;
+
+      // Very small, smooth jitter based on the same phase.
+      const jitterX = s * jitterForce;
+      const jitterY = (s * 1.31 - 0.2) * jitterForce;
+      p.x += jitterX;
+      p.y += jitterY;
+
+      // Hue is used as an integer for caching (visual match is unchanged).
+      let hue = (baseHueOffset + p.hueOffset) % 360;
+      if (hue < 0) hue += 360;
+      hue = hue | 0;
+      const alpha = clamp(
+        p.alpha * 0.7 + centerMix * 0.24 + highEnergy * 0.12,
+        0.06,
+        0.75,
+      );
+      const sizeBase =
+        1.85 +
+        (i % 5) * 0.32 +
+        lowEnergy * 0.8 +
+        midEnergy * 0.35 +
+        highEnergy * 0.45 +
+        centerMix * 0.7;
+      const size = sizeBase * pulse * 1.3;
+
+      const lightness = (54 + centerMix * 14) | 0;
+      const alphaBucket = Math.max(6, Math.min(75, (alpha * 100 + 0.5) | 0));
+      ctx.fillStyle = getCachedHsla(hue, saturation, lightness, alphaBucket);
+      ctx.fillRect(p.x, p.y, size, size);
     }
-
-    // Add car dashboard-style center line
-    ctx.strokeStyle = colors.primary;
-    ctx.lineWidth = 2;
-    ctx.setLineDash([8, 4]);
-    ctx.beginPath();
-    ctx.moveTo(0, centerY);
-    ctx.lineTo(width, centerY);
-    ctx.stroke();
-    ctx.setLineDash([]);
-
-    // Add subtle scan lines for retro car dashboard effect
-    ctx.strokeStyle = `rgba(57, 255, 20, 0.1)`;
-    ctx.lineWidth = 1;
-    for (let y = 0; y < height; y += 3) {
-      ctx.beginPath();
-      ctx.moveTo(0, y);
-      ctx.lineTo(width, y);
-      ctx.stroke();
-    }
-
-    // Add car dashboard-style corner accents (like speedometer corners)
-    const cornerSize = 25;
-    ctx.strokeStyle = colors.primary;
-    ctx.lineWidth = 2;
-
-    // Top-left corner (like speedometer)
-    ctx.beginPath();
-    ctx.moveTo(cornerSize, cornerSize);
-    ctx.lineTo(cornerSize, cornerSize + 20);
-    ctx.moveTo(cornerSize, cornerSize);
-    ctx.lineTo(cornerSize + 20, cornerSize);
-    ctx.stroke();
-
-    // Top-right corner
-    ctx.beginPath();
-    ctx.moveTo(width - cornerSize, cornerSize);
-    ctx.lineTo(width - cornerSize, cornerSize + 20);
-    ctx.moveTo(width - cornerSize, cornerSize);
-    ctx.lineTo(width - cornerSize - 20, cornerSize);
-    ctx.stroke();
-
-    // Bottom-left corner
-    ctx.beginPath();
-    ctx.moveTo(cornerSize, height - cornerSize);
-    ctx.lineTo(cornerSize, height - cornerSize - 20);
-    ctx.moveTo(cornerSize, height - cornerSize);
-    ctx.lineTo(cornerSize + 20, height - cornerSize);
-    ctx.stroke();
-
-    // Bottom-right corner
-    ctx.beginPath();
-    ctx.moveTo(width - cornerSize, height - cornerSize);
-    ctx.lineTo(width - cornerSize, height - cornerSize - 20);
-    ctx.moveTo(width - cornerSize, height - cornerSize);
-    ctx.lineTo(width - cornerSize - 20, height - cornerSize);
-    ctx.stroke();
   }
 
   updateStatus(message, type = "active") {
@@ -1548,14 +2483,18 @@ class AudioVisualizer {
     try {
       const visualType = document.getElementById("visualType").value;
       const sensitivity = document.getElementById("sensitivity").value;
+      const hueOffset =
+        document.getElementById("hueOffset")?.value ??
+        String(this.hueOffset ?? 200);
 
       localStorage.setItem("audVis_visualType", visualType);
       localStorage.setItem("audVis_sensitivity", sensitivity);
+      localStorage.setItem("audVis_hueOffset", hueOffset);
 
       // Save additional preferences
       localStorage.setItem("audVis_lastUsed", new Date().toISOString());
 
-      console.log("Preferences saved:", { visualType, sensitivity });
+      console.log("Preferences saved:", { visualType, sensitivity, hueOffset });
 
       // Show brief visual feedback
       this.showPreferenceFeedback("Preferences saved!", "success");
@@ -1570,13 +2509,27 @@ class AudioVisualizer {
     try {
       const savedVisualType = localStorage.getItem("audVis_visualType");
       const savedSensitivity = localStorage.getItem("audVis_sensitivity");
+      const savedHueOffset = localStorage.getItem("audVis_hueOffset");
 
       if (savedVisualType) {
         const visualTypeSelect = document.getElementById("visualType");
+        const allowedModes = new Set([
+          "waveform",
+          "circular",
+          "lissajous",
+          "particleFlow",
+          "frequency2x",
+          "frequency3x",
+          "frequency4x",
+          "circles",
+        ]);
         if (visualTypeSelect) {
-          visualTypeSelect.value = savedVisualType;
-          this.visualType = savedVisualType;
-          console.log("Loaded visual type:", savedVisualType);
+          const mode = allowedModes.has(savedVisualType)
+            ? savedVisualType
+            : "frequency3x";
+          visualTypeSelect.value = mode;
+          this.visualType = mode;
+          console.log("Loaded visual type:", mode);
         }
       }
 
@@ -1596,8 +2549,19 @@ class AudioVisualizer {
         }
       }
 
+      if (savedHueOffset) {
+        const hueSlider = document.getElementById("hueOffset");
+        const hueValue = document.getElementById("hueOffsetValue");
+        const parsed = parseInt(savedHueOffset, 10);
+        const hue = Number.isFinite(parsed) ? parsed : 200;
+        this.hueOffset = hue;
+        if (hueSlider) hueSlider.value = String(hue);
+        if (hueValue) hueValue.textContent = String(hue);
+        console.log("Loaded hue offset:", hue);
+      }
+
       // Show feedback if preferences were loaded
-      if (savedVisualType || savedSensitivity) {
+      if (savedVisualType || savedSensitivity || savedHueOffset) {
         this.showPreferenceFeedback("Preferences loaded!", "info");
       }
     } catch (error) {
@@ -1610,21 +2574,27 @@ class AudioVisualizer {
     try {
       localStorage.removeItem("audVis_visualType");
       localStorage.removeItem("audVis_sensitivity");
+      localStorage.removeItem("audVis_hueOffset");
       console.log("Preferences cleared");
 
       // Reset to defaults
       this.visualType = "frequency3x";
       this.sensitivity = 1.0;
+      this.hueOffset = 200;
 
       // Update UI
       const visualTypeSelect = document.getElementById("visualType");
       const sensitivitySlider = document.getElementById("sensitivity");
       const sensitivityValue = document.getElementById("sensitivityValue");
+      const hueSlider = document.getElementById("hueOffset");
+      const hueValue = document.getElementById("hueOffsetValue");
 
       if (visualTypeSelect) visualTypeSelect.value = this.visualType;
       if (sensitivitySlider) sensitivitySlider.value = this.sensitivity;
       if (sensitivityValue)
         sensitivityValue.textContent = this.sensitivity.toFixed(1);
+      if (hueSlider) hueSlider.value = String(this.hueOffset);
+      if (hueValue) hueValue.textContent = String(this.hueOffset);
 
       // Show feedback
       this.showPreferenceFeedback("Preferences reset to defaults!", "info");
@@ -1656,6 +2626,9 @@ class AudioVisualizer {
       const preferences = {
         visualType: document.getElementById("visualType").value,
         sensitivity: document.getElementById("sensitivity").value,
+        hueOffset:
+          document.getElementById("hueOffset")?.value ??
+          String(this.hueOffset ?? 200),
         lastUsed: new Date().toISOString(),
         version: "1.0",
       };
@@ -1703,7 +2676,7 @@ class AudioVisualizer {
 
         if (sensitivityValue) {
           sensitivityValue.textContent = parseFloat(
-            preferences.sensitivity
+            preferences.sensitivity,
           ).toFixed(1);
         }
 
@@ -1712,7 +2685,7 @@ class AudioVisualizer {
 
         this.showPreferenceFeedback(
           "Preferences imported successfully!",
-          "success"
+          "success",
         );
       } else {
         throw new Error("Invalid preferences file format");
@@ -1735,19 +2708,23 @@ class AudioVisualizer {
         startBtn.disabled = true;
         screenShareBtn.disabled = true;
         stopBtn.disabled = false;
+        stopBtn.hidden = false;
 
         // Update button text to show current state
         startBtn.textContent = "🎤 Visualizer Active";
-        stopBtn.textContent = "⏹️ Stop Visualizer";
+        stopBtn.textContent = "⏸ Pause";
+        stopBtn.setAttribute("aria-label", "Pause visualizer");
       } else {
         // Visualizer is stopped
         startBtn.disabled = false;
         screenShareBtn.disabled = false;
         stopBtn.disabled = true;
+        stopBtn.hidden = true;
 
         // Reset button text to default
         startBtn.textContent = "🎤 Start Microphone";
-        stopBtn.textContent = "⏹️ Stop Visualizer";
+        stopBtn.textContent = "⏸ Pause";
+        stopBtn.setAttribute("aria-label", "Pause visualizer");
       }
     }
   }
@@ -1920,7 +2897,7 @@ class AudioVisualizer {
           const stream = await navigator.mediaDevices.getUserMedia(constraint);
           console.log(
             "Alternative system audio capture successful with constraints:",
-            constraint
+            constraint,
           );
           return stream;
         } catch (error) {
@@ -1941,8 +2918,9 @@ class AudioVisualizer {
     try {
       // Method: Try to use AudioWorklet for system audio capture
       if (window.AudioWorklet) {
-        const audioContext = new (window.AudioContext ||
-          window.webkitAudioContext)();
+        const audioContext = new (
+          window.AudioContext || window.webkitAudioContext
+        )();
 
         // Try to create a MediaStreamDestination that might capture system audio
         const destination = audioContext.createMediaStreamDestination();
@@ -2000,7 +2978,7 @@ class AudioVisualizer {
           device.kind === "audiooutput" ||
           device.label.toLowerCase().includes("speaker") ||
           device.label.toLowerCase().includes("output") ||
-          device.label.toLowerCase().includes("system")
+          device.label.toLowerCase().includes("system"),
       );
 
       if (audioOutputDevices.length > 0) {
@@ -2028,13 +3006,13 @@ class AudioVisualizer {
 
             console.log(
               "Audio output device capture successful:",
-              device.label
+              device.label,
             );
             return stream;
           } catch (error) {
             console.warn(
               `Failed to capture from device ${device.label}:`,
-              error
+              error,
             );
             continue;
           }
@@ -2052,8 +3030,9 @@ class AudioVisualizer {
   async tryAudioContextCapture() {
     try {
       // Method: Try to create an audio context that might capture system audio
-      const audioContext = new (window.AudioContext ||
-        window.webkitAudioContext)();
+      const audioContext = new (
+        window.AudioContext || window.webkitAudioContext
+      )();
 
       // Try to create a MediaStreamDestination to capture system audio
       const destination = audioContext.createMediaStreamDestination();
