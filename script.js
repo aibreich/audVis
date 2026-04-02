@@ -539,6 +539,44 @@ function lerp(a, b, t) {
   return a + (b - a) * t;
 }
 
+/** H in degrees 0..360, S/L in 0..1. Returns [r,g,b] bytes. */
+function hslToRgbBytes(h, s, l) {
+  h = ((h % 360) + 360) % 360;
+  s = clamp(s, 0, 1);
+  l = clamp(l, 0, 1);
+  const c = (1 - Math.abs(2 * l - 1)) * s;
+  const hp = h / 60;
+  const x = c * (1 - Math.abs((hp % 2) - 1));
+  let r1 = 0;
+  let g1 = 0;
+  let b1 = 0;
+  if (hp < 1) {
+    r1 = c;
+    g1 = x;
+  } else if (hp < 2) {
+    r1 = x;
+    g1 = c;
+  } else if (hp < 3) {
+    g1 = c;
+    b1 = x;
+  } else if (hp < 4) {
+    g1 = x;
+    b1 = c;
+  } else if (hp < 5) {
+    r1 = x;
+    b1 = c;
+  } else {
+    r1 = c;
+    b1 = x;
+  }
+  const m = l - c / 2;
+  return [
+    Math.round(clamp((r1 + m) * 255, 0, 255)),
+    Math.round(clamp((g1 + m) * 255, 0, 255)),
+    Math.round(clamp((b1 + m) * 255, 0, 255)),
+  ];
+}
+
 class AudioVisualizer {
   constructor() {
     this.audioContext = null;
@@ -602,6 +640,7 @@ class AudioVisualizer {
     // Hard-cap to a low, safe range (will be clamped again in init).
     this.particleFlowCount = 120;
     this._particleFlowFrame = 0;
+
     // Adaptive quality: dynamically adjusts particle count when the renderer is under load.
     // Key design choice: only touches Particle Flow (other modes remain visually identical).
     this._perf = {
@@ -624,6 +663,98 @@ class AudioVisualizer {
     this._hslaCache = new Map();
     this._hslaCacheMax = 2048;
 
+    // Audio Geometry (3D particle graph, FFT-driven)
+    this._agCap = 1500;
+    this._agRing = null;
+    this._agHead = 0;
+    this._agCount = 0;
+    this._agCentroidSm = 0.5;
+    this._agAmpSm = 0;
+    this._agProjSX = new Float32Array(this._agCap);
+    this._agProjSY = new Float32Array(this._agCap);
+    this._agProjZ = new Float32Array(this._agCap);
+    this._agProjA = new Float32Array(this._agCap);
+    this._agProjSize = new Float32Array(this._agCap);
+    this._agProjR = new Uint8Array(this._agCap);
+    this._agProjG = new Uint8Array(this._agCap);
+    this._agProjB = new Uint8Array(this._agCap);
+    this._agSortIdx = new Array(this._agCap);
+    /** When true, draws lines between consecutive temporal particles */
+    this._agSequentialLines = true;
+    this._agNeighborDistSq = 72 * 72;
+    this._agNeighborLookahead = 26;
+    this._agMaxAgeMs = 5000;
+    this._agFocal = 420;
+    /** Fraction of canvas width/height used as padding from each edge (e.g. 0.06 ≈ 6%). */
+    this._agMarginPct = 0.06;
+    /**
+     * Radial softness for screen-space confinement (higher = tighter pull toward center
+     * before asymptote; ~0.75–1.05 feels expansive but contained).
+     */
+    this._agRadialKappa = 0.88;
+    /** Multiplier on remapped radius so the cloud sits slightly inside the padded ellipse. */
+    this._agInnerScale = 0.9;
+    /** Smoothed 0..1 “near boundary” signal used to gently bias new spawns inward. */
+    this._agEdgePressure = 0;
+    this._agEdgePressureAlpha = 0.13;
+    /** Normalized screen radius beyond which we start accumulating edge pressure. */
+    this._agEdgePressureStart = 0.72;
+    /** Max inward scale applied to new particle x3d/y3d when edge pressure is 1. */
+    this._agSpawnInwardMax = 0.1;
+
+    /**
+     * Painter mode: FFT-driven 3D point-cloud graph (reference-style embedding).
+     * Tune here; global Sensitivity + Hue still apply on top.
+     */
+    this.painterConfig = {
+      nodeCount: 900,
+      spawnPerFrame: 14,
+      spawnOnsetBurst: 9,
+      connectionDensity: 0.92,
+      neighborLookahead: 12,
+      neighborDistBase: 48,
+      /** Multiplier on 3D→screen spread (larger = more open layout). */
+      projectionScale: 7.66,
+      /** Applied to spawned node size and drawn radius. */
+      nodeSizeScale: 1.15,
+      /** Canvas stroke width for graph edges (neighbor + sequential). */
+      lineWidth: 1.85,
+      maxAgeMs: 5200,
+      /** 0 = fixed viewpoint (no slow orbit). Try 0.35–1 for gentle drift. */
+      cameraDriftSpeed: 0,
+      depthIntensity: 1.06,
+      focal: 415,
+      sensitivityMultiplier: 1,
+      marginPct: 0.054,
+      radialKappa: 0.9,
+      innerScale: 1.9,
+      edgePressureAlpha: 0.12,
+      edgePressureStart: 0.72,
+      spawnInwardMax: 0.2,
+      maxLineSegments: 2200,
+    };
+    this._painterCap = this.painterConfig.nodeCount;
+    this._painterRing = null;
+    this._painterHead = 0;
+    this._painterCount = 0;
+    this._painterPrevSpec = null;
+    this._painterCentroidSm = 0.35;
+    this._painterFluxSm = 0;
+    this._painterAmpSm = 0;
+    this._painterPathPhase = 0;
+    this._painterAttract = { x: 0, y: 0, z: 0 };
+    this._painterEdgePressure = 0;
+    const pCap = this._painterCap;
+    this._painterProjSX = new Float32Array(pCap);
+    this._painterProjSY = new Float32Array(pCap);
+    this._painterProjZ = new Float32Array(pCap);
+    this._painterProjA = new Float32Array(pCap);
+    this._painterProjSize = new Float32Array(pCap);
+    this._painterProjR = new Uint8Array(pCap);
+    this._painterProjG = new Uint8Array(pCap);
+    this._painterProjB = new Uint8Array(pCap);
+    this._painterSortIdx = new Array(pCap);
+
     // Performance controls
     this.targetFPS = 45; // reduce FPS for lower resource usage
     this.lastFrameTime = 0;
@@ -634,6 +765,8 @@ class AudioVisualizer {
     this.autoModeSwitch = false;
     this._lastAutoSwitchTs = 0;
     this._autoSwitchCooldownMs = 14000; // slow transitions only
+
+    this._debugMenuVisible = false;
 
     this.init();
     this.initParticleFlowPool();
@@ -697,6 +830,98 @@ class AudioVisualizer {
         this.canvas.height = window.innerHeight;
       }
     });
+
+    const debugMenuEl = document.getElementById("debugMenu");
+    const debugCloseBtn = debugMenuEl?.querySelector(".debug-menu-close");
+    if (debugCloseBtn) {
+      debugCloseBtn.addEventListener("click", () =>
+        this.setDebugMenuVisible(false),
+      );
+    }
+    document.addEventListener(
+      "keydown",
+      (e) => this.onDebugMenuKeydown(e),
+      true,
+    );
+  }
+
+  _isTextEntryTarget(el) {
+    if (!el || el.nodeType !== Node.ELEMENT_NODE) return false;
+    if (el.isContentEditable) return true;
+    const tag = el.tagName;
+    if (tag === "TEXTAREA" || tag === "SELECT") return true;
+    if (tag === "INPUT") {
+      const type = (el.getAttribute("type") || "text").toLowerCase();
+      const textTypes = new Set([
+        "text",
+        "search",
+        "email",
+        "url",
+        "tel",
+        "password",
+        "number",
+      ]);
+      return textTypes.has(type);
+    }
+    return false;
+  }
+
+  setDebugMenuVisible(visible) {
+    this._debugMenuVisible = !!visible;
+    const el = document.getElementById("debugMenu");
+    const readout = document.getElementById("debugMenuReadout");
+    if (!el) return;
+    el.hidden = !this._debugMenuVisible;
+    el.setAttribute("aria-hidden", this._debugMenuVisible ? "false" : "true");
+    if (this._debugMenuVisible) this.updateDebugMenuReadout();
+    else if (readout) readout.textContent = "";
+  }
+
+  toggleDebugMenu() {
+    this.setDebugMenuVisible(!this._debugMenuVisible);
+  }
+
+  onDebugMenuKeydown(e) {
+    if (this._debugMenuVisible && e.key === "Escape") {
+      this.setDebugMenuVisible(false);
+      e.preventDefault();
+      e.stopPropagation();
+      return;
+    }
+    if (e.key !== "d" && e.key !== "D") return;
+    if (e.ctrlKey || e.metaKey || e.altKey) return;
+    if (this._isTextEntryTarget(e.target)) return;
+    e.preventDefault();
+    this.toggleDebugMenu();
+  }
+
+  updateDebugMenuReadout() {
+    if (!this._debugMenuVisible) return;
+    const readout = document.getElementById("debugMenuReadout");
+    if (!readout) return;
+
+    const avgMs = this._perf?.avgFrameMs;
+    const fpsFromAvg = avgMs && avgMs > 0 ? (1000 / avgMs).toFixed(1) : null;
+    const sr = this.audioContext?.sampleRate;
+    const fft = this.analyser?.fftSize;
+    const bpm = this.rhythm?.bpmEstimate;
+    const bpmLine = bpm && bpm >= 40 && bpm <= 220 ? `${Math.round(bpm)}` : "—";
+
+    const lines = [
+      `visual: ${this.visualType}`,
+      `canvas: ${this.canvas?.width ?? 0}×${this.canvas?.height ?? 0}`,
+      `audio: ${this.isPlaying ? "active" : "idle"}${
+        sr ? `  ${sr} Hz` : ""
+      }${fft ? `  fft ${fft}` : ""}`,
+      `target FPS: ${this.targetFPS}  frame: ${
+        avgMs != null ? avgMs.toFixed(2) + " ms" : "—"
+      }${fpsFromAvg ? `  (~${fpsFromAvg} fps)` : ""}`,
+      `style profile: ${this.style?.profile ?? "—"}`,
+      `particles: ${this.particleFlowCount ?? "—"} (particle flow pool)`,
+      `beat BPM est.: ${bpmLine}`,
+      `fullscreen: ${this.isFullscreen ? "yes" : "no"}`,
+    ];
+    readout.textContent = lines.join("\n");
   }
 
   // Debounced wrapper for preference persistence.
@@ -1337,6 +1562,7 @@ class AudioVisualizer {
       this.maybeAdjustParticleFlowQuality(timestamp);
 
       this.draw();
+      if (this._debugMenuVisible) this.updateDebugMenuReadout();
       this.animationId = requestAnimationFrame(animate);
     };
 
@@ -1540,6 +1766,9 @@ class AudioVisualizer {
     this.lastRaindropTime = 0;
     this.barRaindropTimers = []; // Clear individual bar timers
 
+    this._resetAudioGeometry();
+    this._resetPainter();
+
     // Clear canvas - ensure it exists first
     if (this.canvas && this.ctx) {
       this.ctx.clearRect(0, 0, this.canvas.width, this.canvas.height);
@@ -1567,6 +1796,15 @@ class AudioVisualizer {
     // If mode changed, hard clear once to avoid inheriting previous mode's last frame.
     if (this._lastVisualType !== this.visualType) {
       ctx.clearRect(0, 0, w, h);
+      if (
+        this._lastVisualType === "audioGeometry" ||
+        this.visualType === "audioGeometry"
+      ) {
+        this._resetAudioGeometry();
+      }
+      if (this._lastVisualType === "painter" || this.visualType === "painter") {
+        this._resetPainter();
+      }
     }
 
     // Lissajous looks best with a subtle decay trail (stable, non-flashy).
@@ -1575,7 +1813,15 @@ class AudioVisualizer {
       // Make it noticeably faster (near-clear) while still keeping a tiny trail.
       ctx.fillStyle = "rgba(6, 7, 9, 0.70)";
       ctx.fillRect(0, 0, w, h);
-    } else if (this.visualType === "particleFlow") {
+    } else if (this.visualType === "painter") {
+      // Full clear + solid backdrop each frame (no stacked semi-transparent fills — those grey out the canvas).
+      ctx.clearRect(0, 0, w, h);
+      ctx.fillStyle = "#0f1014";
+      ctx.fillRect(0, 0, w, h);
+    } else if (
+      this.visualType === "particleFlow" ||
+      this.visualType === "audioGeometry"
+    ) {
       // No trails: hard clear every frame.
       ctx.clearRect(0, 0, w, h);
     } else {
@@ -1585,13 +1831,12 @@ class AudioVisualizer {
     // Use boosted frequency data if available, otherwise fall back to original
     const frequencyData = this.boostedFrequencyData || this.frequencyData;
 
-    // Continuous, subtle energy scale (no beat/pulse spikes)
+    // Continuous, subtle energy scale (no beat/pulse spikes).
     const scale = this.visualScale || 1;
     ctx.save();
     ctx.translate(w * 0.5, h * 0.5);
     ctx.scale(scale, scale);
     ctx.translate(-w * 0.5, -h * 0.5);
-    // Very subtle global intensity boost (kept smooth; no flashing)
     ctx.globalAlpha = 0.85 + Math.min(0.15, this.visualIntensity * 0.15);
 
     switch (this.visualType) {
@@ -1618,6 +1863,12 @@ class AudioVisualizer {
         break;
       case "particleFlow":
         this.drawParticleFlow();
+        break;
+      case "audioGeometry":
+        this.drawAudioGeometry();
+        break;
+      case "painter":
+        this.drawPainter();
         break;
     }
 
@@ -2298,6 +2549,692 @@ class AudioVisualizer {
     p.life = seed % 1;
   }
 
+  _resetAudioGeometry() {
+    this._agHead = 0;
+    this._agCount = 0;
+    this._agCentroidSm = 0.5;
+    this._agAmpSm = 0;
+    this._agEdgePressure = 0;
+  }
+
+  _resetPainter() {
+    this._painterHead = 0;
+    this._painterCount = 0;
+    this._painterCentroidSm = 0.35;
+    this._painterFluxSm = 0;
+    this._painterAmpSm = 0;
+    this._painterPathPhase = 0;
+    this._painterAttract = { x: 0, y: 0, z: 0 };
+    this._painterEdgePressure = 0;
+    if (this._painterPrevSpec && this._painterPrevSpec.length > 0) {
+      this._painterPrevSpec.fill(0);
+    }
+  }
+
+  _painterRemapSoftBoundaries(sxArr, syArr, count, w, h) {
+    const pc = this.painterConfig;
+    const marginPct = clamp(pc.marginPct ?? 0.054, 0.02, 0.22);
+    const cx = w * 0.5;
+    const cy = h * 0.5;
+    const mx = w * marginPct;
+    const my = h * marginPct;
+    const hx = Math.max(w * 0.06, w * 0.5 - mx);
+    const hy = Math.max(h * 0.06, h * 0.5 - my);
+    const kappa = clamp(pc.radialKappa ?? 0.9, 0.45, 1.6);
+    const innerScale = clamp(pc.innerScale ?? 0.9, 0.72, 0.98);
+    const pStart = clamp(pc.edgePressureStart ?? 0.72, 0.35, 0.95);
+    const epAlpha = clamp(pc.edgePressureAlpha ?? 0.12, 0.04, 0.35);
+
+    let maxPress = 0;
+    for (let i = 0; i < count; i++) {
+      const dx = sxArr[i] - cx;
+      const dy = syArr[i] - cy;
+      const ux = dx / hx;
+      const uy = dy / hy;
+      const r = Math.sqrt(ux * ux + uy * uy + 1e-12);
+      if (r > pStart) {
+        const span = Math.max(0.08, 1.05 - pStart);
+        const p = clamp01((r - pStart) / span);
+        if (p > maxPress) maxPress = p;
+      }
+    }
+
+    this._painterEdgePressure +=
+      (maxPress - this._painterEdgePressure) * epAlpha;
+    this._painterEdgePressure = clamp01(this._painterEdgePressure);
+
+    for (let i = 0; i < count; i++) {
+      const dx = sxArr[i] - cx;
+      const dy = syArr[i] - cy;
+      const ux = dx / hx;
+      const uy = dy / hy;
+      const r = Math.sqrt(ux * ux + uy * uy + 1e-12);
+      const rk = r * kappa;
+      const mag =
+        r < 1e-6 ? innerScale : ((1 - Math.exp(-rk)) / rk) * innerScale;
+      sxArr[i] = cx + ux * mag * hx;
+      syArr[i] = cy + uy * mag * hy;
+    }
+  }
+
+  _ensurePainterRing() {
+    if (this._painterRing) return;
+    const cap = this._painterCap;
+    const t0 = performance.now();
+    this._painterRing = new Array(cap);
+    for (let i = 0; i < cap; i++) {
+      this._painterRing[i] = {
+        x3d: 0,
+        y3d: 0,
+        z3d: 0,
+        r: 80,
+        g: 140,
+        b: 220,
+        size: 2,
+        born: t0,
+      };
+    }
+  }
+
+  _painterAllocSlot() {
+    const cap = this._painterCap;
+    if (this._painterCount < cap) {
+      const slot = (this._painterHead + this._painterCount) % cap;
+      this._painterCount++;
+      return slot;
+    }
+    const slot = this._painterHead;
+    this._painterHead = (this._painterHead + 1) % cap;
+    return slot;
+  }
+
+  drawPainter() {
+    if (!this.canvas || !this.ctx) return;
+    this._ensurePainterRing();
+
+    const ctx = this.ctx;
+    const w = this.canvas.width;
+    const h = this.canvas.height;
+    const cx = w * 0.5;
+    const cy = h * 0.5;
+    const pc = this.painterConfig;
+    const cap = this._painterCap;
+    const ring = this._painterRing;
+    const now = performance.now();
+    const sr = this.audioContext ? this.audioContext.sampleRate : 48000;
+    const nyq = sr * 0.5;
+    const sens = Number.isFinite(this.sensitivity) ? this.sensitivity : 1;
+    const sensMul = sens * (pc.sensitivityMultiplier ?? 1);
+    const maxAge = pc.maxAgeMs ?? 5200;
+    const focalBase = (pc.focal ?? 415) * (pc.depthIntensity ?? 1);
+    const maxLines = pc.maxLineSegments ?? 2200;
+
+    const spec =
+      this.smoothedFrequencyData &&
+      this.frequencyData &&
+      this.smoothedFrequencyData.length === this.frequencyData.length
+        ? this.smoothedFrequencyData
+        : this.getVizSpectrum();
+    if (!spec || spec.length < 8) return;
+
+    const n = spec.length;
+    const hzPerBin = nyq / n;
+    if (!this._painterPrevSpec || this._painterPrevSpec.length !== n) {
+      this._painterPrevSpec = new Float32Array(n);
+    }
+    const prev = this._painterPrevSpec;
+
+    let sumMag = 0;
+    let weighted = 0;
+    let sumSq = 0;
+    let flux = 0;
+    for (let i = 0; i < n; i++) {
+      const v = spec[i];
+      sumMag += v;
+      weighted += i * v;
+      sumSq += v * v;
+      const d = v - prev[i];
+      if (d > 0) flux += d * d;
+    }
+    flux = Math.sqrt(flux / n) / 255;
+    const centroidBin = sumMag > 6 ? weighted / sumMag : n * 0.28;
+    const centroidHz = centroidBin * hzPerBin;
+    const centroidNorm = clamp01(centroidHz / nyq);
+    const ampRaw = Math.sqrt(sumSq / n) / 255;
+
+    this._painterCentroidSm += (centroidNorm - this._painterCentroidSm) * 0.14;
+    this._painterFluxSm += (flux - this._painterFluxSm) * 0.24;
+    this._painterAmpSm += (ampRaw * sensMul * 1.25 - this._painterAmpSm) * 0.18;
+
+    const c = this._painterCentroidSm;
+    const f = this._painterFluxSm;
+    const a = clamp01(this._painterAmpSm);
+
+    const i1 = (n * 0.12) | 0;
+    const i2 = (n * 0.42) | 0;
+    const i3 = (n * 0.72) | 0;
+    let low = 0;
+    let mid = 0;
+    let high = 0;
+    for (let i = 0; i < i1; i++) low += spec[i];
+    for (let i = i1; i < i2; i++) mid += spec[i];
+    for (let i = i2; i < n; i++) high += spec[i];
+    const lN = low / (low + mid + high + 1e-6);
+    const mN = mid / (low + mid + high + 1e-6);
+    const hN = high / (low + mid + high + 1e-6);
+
+    const beatEnv = this.behavior ? clamp01(this.behavior.beatEnv) : 0;
+    const beatHit = this.rhythm && this.rhythm.beatDetected ? 1 : 0;
+    const onset = clamp01(f * 1.85 + beatEnv * 0.45 + beatHit * 0.25);
+
+    const ax = (c - 0.5) * 2.9 + (hN - lN) * 1.05;
+    const ay = (mN - 0.5) * 2.1 + f * 1.35;
+    const az = (lN - hN) * 0.75 + Math.sin(now * 0.0007) * 0.06;
+    this._painterAttract.x += (ax - this._painterAttract.x) * 0.085;
+    this._painterAttract.y += (ay - this._painterAttract.y) * 0.085;
+    this._painterAttract.z += (az - this._painterAttract.z) * 0.065;
+
+    const t = now * 0.001;
+    this._painterPathPhase += 0.018 + f * 0.12 + a * 0.06;
+
+    const peaks = [
+      { i: 0, v: 0 },
+      { i: 0, v: 0 },
+      { i: 0, v: 0 },
+      { i: 0, v: 0 },
+    ];
+    const regions = [
+      [0, i1],
+      [i1, i2],
+      [i2, i3],
+      [i3, n],
+    ];
+    for (let r = 0; r < 4; r++) {
+      let maxI = regions[r][0];
+      let maxV = -1;
+      for (let i = regions[r][0]; i < regions[r][1]; i++) {
+        if (spec[i] > maxV) {
+          maxV = spec[i];
+          maxI = i;
+        }
+      }
+      peaks[r].i = maxI;
+      peaks[r].v = maxV / 255;
+    }
+
+    const small = Math.min(w, h);
+    const mobileTight = small < 520;
+    const spawnBase = Math.max(
+      3,
+      (pc.spawnPerFrame | 0) - (mobileTight ? 4 : 0),
+    );
+    const burst = Math.floor(onset * (pc.spawnOnsetBurst ?? 9) * sensMul);
+    const spawns = clamp(spawnBase + burst, 3, mobileTight ? 18 : 26);
+
+    const inward =
+      1 -
+      clamp(pc.spawnInwardMax ?? 0.1, 0, 0.22) *
+        (this._painterEdgePressure || 0);
+
+    for (let s = 0; s < spawns; s++) {
+      const peak = peaks[s % 4];
+      const u = peak.i / Math.max(1, n - 1);
+      const phase = this._painterPathPhase + s * 0.73 + u * 8.4;
+      const branch = (s % 5) * 0.61;
+      const arc =
+        Math.sin(phase * 0.88 + u * 14.2 + c * 6.28) * (0.55 + f * 1.2);
+      const arc2 = Math.cos(phase * 1.07 + branch) * (0.42 + mN * 0.9);
+
+      let x3d =
+        this._painterAttract.x * 2.9 +
+        (u - 0.5) * 2.55 * sensMul +
+        arc +
+        Math.sin(t * 0.51 + u * 11.1) * 0.48;
+      let y3d =
+        this._painterAttract.y * 2.6 +
+        arc2 +
+        Math.cos(t * 0.44 + f * 10) * 0.52;
+      let z3d =
+        this._painterAttract.z * 2.15 +
+        (u - 0.5) * 1.8 +
+        Math.sin(phase * 1.19) * (0.55 + hN * 0.9);
+
+      x3d += (peak.v - 0.2) * 1.1 * sensMul;
+      y3d += (onset - 0.15) * 0.85;
+      z3d += beatHit * 0.35;
+
+      x3d *= inward;
+      y3d *= inward;
+      z3d *= 1 - (1 - inward) * 0.35;
+
+      const hueBase = (270 - u * 270 + (this.hueOffset || 0)) % 360;
+      const hue = hueBase < 0 ? hueBase + 360 : hueBase;
+      const sat = 0.78 + peak.v * 0.12;
+      const light = 0.42 + peak.v * 0.22 + onset * 0.08;
+      const rgb = hslToRgbBytes(hue, sat, light);
+      const rr = rgb[0];
+      const gg = rgb[1];
+      const bb = rgb[2];
+
+      const ns = pc.nodeSizeScale ?? 1.55;
+      const size =
+        (0.85 + peak.v * 6.2 * sensMul + onset * 1.05 + beatHit * 0.35) *
+        (0.58 + a * 1) *
+        ns;
+
+      const slot = this._painterAllocSlot();
+      const p = ring[slot];
+      p.x3d = x3d;
+      p.y3d = y3d;
+      p.z3d = z3d;
+      p.r = clamp(rr, 0, 255);
+      p.g = clamp(gg, 0, 255);
+      p.b = clamp(bb, 0, 255);
+      p.size = size;
+      p.born = now;
+    }
+
+    for (let i = 0; i < n; i++) prev[i] = spec[i];
+
+    const count = this._painterCount;
+    if (count < 1) return;
+
+    const head = this._painterHead;
+    const drift = pc.cameraDriftSpeed ?? 1;
+    const rotY = now * 0.000062 * drift;
+    const rotX = now * 0.000038 * drift;
+    const cosY = Math.cos(rotY);
+    const sinY = Math.sin(rotY);
+    const cosX = Math.cos(rotX);
+    const sinX = Math.sin(rotX);
+    const scaleXY = Math.min(w, h) * 0.086 * (pc.projectionScale ?? 1.16);
+
+    const sxArr = this._painterProjSX;
+    const syArr = this._painterProjSY;
+    const zArr = this._painterProjZ;
+    const aArr = this._painterProjA;
+    const sArr = this._painterProjSize;
+    const rArr = this._painterProjR;
+    const gArr = this._painterProjG;
+    const bArr = this._painterProjB;
+    const idxs = this._painterSortIdx;
+
+    for (let k = 0; k < count; k++) {
+      const p = ring[(head + k) % cap];
+      const ageMs = now - p.born;
+      const lifeA = ageMs >= maxAge ? 0 : 1 - ageMs / maxAge;
+
+      let rx = p.x3d * cosY - p.z3d * sinY;
+      let rz = p.x3d * sinY + p.z3d * cosY;
+      let ry = p.y3d;
+      const ry2 = ry * cosX - rz * sinX;
+      rz = ry * sinX + rz * cosX;
+      ry = ry2;
+
+      const zClamped = Math.max(
+        -focalBase * 0.78,
+        Math.min(focalBase * 1.45, rz),
+      );
+      const persp = focalBase / (focalBase + zClamped);
+      sxArr[k] = cx + rx * scaleXY * persp;
+      syArr[k] = cy + ry * scaleXY * persp;
+      zArr[k] = zClamped;
+      const distFade = 0.55 + 0.45 * persp;
+      aArr[k] = lifeA * distFade;
+      sArr[k] = p.size * (0.82 + 0.58 * persp) * distFade;
+      rArr[k] = p.r;
+      gArr[k] = p.g;
+      bArr[k] = p.b;
+    }
+
+    this._painterRemapSoftBoundaries(sxArr, syArr, count, w, h);
+
+    // Recenter after projection + remap: audio-driven 3D bias otherwise pulls the cloud sideways.
+    let meanSx = 0;
+    let meanSy = 0;
+    for (let k = 0; k < count; k++) {
+      meanSx += sxArr[k];
+      meanSy += syArr[k];
+    }
+    const invC = 1 / count;
+    meanSx *= invC;
+    meanSy *= invC;
+    const shiftX = cx - meanSx;
+    const shiftY = cy - meanSy;
+    for (let k = 0; k < count; k++) {
+      sxArr[k] += shiftX;
+      syArr[k] += shiftY;
+    }
+
+    for (let k = 0; k < count; k++) idxs[k] = k;
+    idxs.length = count;
+    idxs.sort((i, j) => zArr[i] - zArr[j]);
+
+    const dens = pc.connectionDensity ?? 0.92;
+    const baseDist = (pc.neighborDistBase ?? 48) / (0.35 + dens * 1.2);
+    const d2Thr = baseDist * baseDist;
+    const neighMax = Math.min(pc.neighborLookahead ?? 12, count - 1);
+    const lw = pc.lineWidth ?? 1.85;
+
+    let lineBudget = maxLines;
+    ctx.lineWidth = lw;
+    ctx.globalCompositeOperation = "source-over";
+
+    for (let u = 0; u < count && lineBudget > 0; u++) {
+      const k = idxs[u];
+      if (aArr[k] < 0.04) continue;
+      const lim = Math.min(k + neighMax, count - 1);
+      for (let j = k + 1; j <= lim; j++) {
+        const dx = sxArr[k] - sxArr[j];
+        const dy = syArr[k] - syArr[j];
+        if (dx * dx + dy * dy > d2Thr) continue;
+        const alpha = Math.min(aArr[k], aArr[j]) * 0.22;
+        if (alpha < 0.028) continue;
+        ctx.strokeStyle = `rgba(210,218,242,${alpha})`;
+        ctx.beginPath();
+        ctx.moveTo(sxArr[k], syArr[k]);
+        ctx.lineTo(sxArr[j], syArr[j]);
+        ctx.stroke();
+        lineBudget--;
+        if (lineBudget <= 0) break;
+      }
+    }
+
+    if (count > 1) {
+      ctx.lineWidth = lw * 0.92;
+      for (let k = 0; k < count - 1 && lineBudget > 0; k++) {
+        const alpha = Math.min(aArr[k], aArr[k + 1]) * 0.2;
+        if (alpha < 0.03) continue;
+        ctx.strokeStyle = `rgba(190, 215, 255, ${alpha})`;
+        ctx.beginPath();
+        ctx.moveTo(sxArr[k], syArr[k]);
+        ctx.lineTo(sxArr[k + 1], syArr[k + 1]);
+        ctx.stroke();
+        lineBudget--;
+      }
+    }
+
+    for (let u = 0; u < count; u++) {
+      const k = idxs[u];
+      const alpha = aArr[k];
+      if (alpha < 0.02) continue;
+      const sz = sArr[k];
+      if (sz < 0.45) continue;
+      ctx.fillStyle = `rgba(${rArr[k]},${gArr[k]},${bArr[k]},${alpha * 0.96})`;
+      ctx.beginPath();
+      ctx.arc(sxArr[k], syArr[k], sz * 0.56, 0, Math.PI * 2);
+      ctx.fill();
+    }
+  }
+
+  /**
+   * Smoothly maps projected points into a padded inner region (ellipse in normalized space).
+   * Updates edge-pressure EMA from pre-remap radii for subtle spawn damping.
+   */
+  _agRemapSoftBoundaries(sxArr, syArr, count, w, h) {
+    const marginPct = clamp(this._agMarginPct, 0.02, 0.22);
+    const cx = w * 0.5;
+    const cy = h * 0.5;
+    const mx = w * marginPct;
+    const my = h * marginPct;
+    const hx = Math.max(w * 0.06, w * 0.5 - mx);
+    const hy = Math.max(h * 0.06, h * 0.5 - my);
+    const kappa = clamp(this._agRadialKappa, 0.45, 1.6);
+    const innerScale = clamp(this._agInnerScale, 0.72, 0.98);
+    const pStart = clamp(this._agEdgePressureStart, 0.35, 0.95);
+    const epAlpha = clamp(this._agEdgePressureAlpha, 0.04, 0.35);
+
+    let maxPress = 0;
+
+    for (let i = 0; i < count; i++) {
+      const dx = sxArr[i] - cx;
+      const dy = syArr[i] - cy;
+      const ux = dx / hx;
+      const uy = dy / hy;
+      const r = Math.sqrt(ux * ux + uy * uy + 1e-12);
+      if (r > pStart) {
+        const span = Math.max(0.08, 1.05 - pStart);
+        const p = clamp01((r - pStart) / span);
+        if (p > maxPress) maxPress = p;
+      }
+    }
+
+    this._agEdgePressure += (maxPress - this._agEdgePressure) * epAlpha;
+    this._agEdgePressure = clamp01(this._agEdgePressure);
+
+    for (let i = 0; i < count; i++) {
+      const dx = sxArr[i] - cx;
+      const dy = syArr[i] - cy;
+      const ux = dx / hx;
+      const uy = dy / hy;
+      const r = Math.sqrt(ux * ux + uy * uy + 1e-12);
+      const rk = r * kappa;
+      const mag =
+        r < 1e-6 ? innerScale : ((1 - Math.exp(-rk)) / rk) * innerScale;
+      sxArr[i] = cx + ux * mag * hx;
+      syArr[i] = cy + uy * mag * hy;
+    }
+  }
+
+  _ensureAudioGeomRing() {
+    if (this._agRing) return;
+    const cap = this._agCap;
+    const t0 = performance.now();
+    this._agRing = new Array(cap);
+    for (let i = 0; i < cap; i++) {
+      this._agRing[i] = {
+        x3d: 0,
+        y3d: 0,
+        z3d: 0,
+        r: 80,
+        g: 140,
+        b: 220,
+        size: 2,
+        born: t0,
+      };
+    }
+  }
+
+  /** @returns {number} ring slot index for the new / overwritten particle */
+  _audioGeomAllocSlot() {
+    const cap = this._agCap;
+    if (this._agCount < cap) {
+      const slot = (this._agHead + this._agCount) % cap;
+      this._agCount++;
+      return slot;
+    }
+    const slot = this._agHead;
+    this._agHead = (this._agHead + 1) % cap;
+    return slot;
+  }
+
+  drawAudioGeometry() {
+    if (!this.canvas || !this.ctx) return;
+    this._ensureAudioGeomRing();
+
+    const ctx = this.ctx;
+    const w = this.canvas.width;
+    const h = this.canvas.height;
+    const cx = w * 0.5;
+    const cy = h * 0.5;
+    const data = this.getVizSpectrum();
+    const sr = this.audioContext ? this.audioContext.sampleRate : 48000;
+    const now = performance.now();
+    const cap = this._agCap;
+    const ring = this._agRing;
+    const maxAge = this._agMaxAgeMs;
+    const focal = this._agFocal;
+    const sens = Number.isFinite(this.sensitivity) ? this.sensitivity : 1;
+
+    if (data && data.length > 0) {
+      const n = data.length;
+      const nyq = sr * 0.5;
+      const hzPerBin = nyq / n;
+      let sumMag = 0;
+      let weighted = 0;
+      let sumSq = 0;
+      for (let i = 0; i < n; i++) {
+        const m = data[i];
+        sumMag += m;
+        weighted += i * m;
+        sumSq += m * m;
+      }
+      const centroidBin = sumMag > 6 ? weighted / sumMag : n * 0.32;
+      const centroidHz = centroidBin * hzPerBin;
+      const centroidNorm = clamp01(centroidHz / nyq);
+      const ampRaw = Math.sqrt(sumSq / n) / 255;
+
+      this._agCentroidSm += (centroidNorm - this._agCentroidSm) * 0.16;
+      this._agAmpSm += (ampRaw * sens * 1.25 - this._agAmpSm) * 0.2;
+      const c = this._agCentroidSm;
+      const a = clamp01(this._agAmpSm);
+
+      const L = this.energyNorm ? clamp01(this.energyNorm.lowNorm) : 0.33;
+      const M = this.energyNorm ? clamp01(this.energyNorm.midNorm) : 0.33;
+      const Hb = this.energyNorm ? clamp01(this.energyNorm.highNorm) : 0.33;
+      const bandSum = L + M + Hb + 1e-4;
+
+      const t = (this.lastFrameTime || now) * 0.001;
+      const warp = c * Math.PI * 2;
+      const orbit = t * (0.38 + a * 0.55);
+      const r0 = 2.0 + a * 4.2 + M * 1.35;
+      const theta = orbit * 1.22 + warp + Math.sin(t * 0.73 + a * 4.2) * 0.65;
+      const phi = orbit * 0.88 + c * 4.5 + Math.cos(t * 0.52) * 0.58;
+      const clusterPullX = (c - 0.5) * 2.9 + (Hb - L) * 0.85;
+      const clusterPullY = (L - Hb) * 1.75;
+      const clusterPullZ = (M - 0.5) * 2.1;
+
+      let x3d = r0 * Math.sin(phi) * Math.cos(theta) + clusterPullX * 0.52;
+      let y3d = r0 * Math.sin(phi) * Math.sin(theta) + clusterPullY * 0.52;
+      let z3d = r0 * Math.cos(phi) * 0.88 + clusterPullZ * 0.48;
+      x3d += Math.sin(t * 1.08 + warp * 2) * (0.28 + a * 1.1);
+      y3d += Math.cos(t * 0.97 + a * 6) * (0.22 + a * 0.95);
+      z3d += Math.sin(t * 0.82 + c * 8) * (0.38 + a * 0.85);
+
+      const inward =
+        1 -
+        clamp(this._agSpawnInwardMax, 0, 0.22) * (this._agEdgePressure || 0);
+      x3d *= inward;
+      y3d *= inward;
+      z3d *= 1 - (1 - inward) * 0.35;
+
+      const rCol = Math.min(255, (Hb / bandSum) * 300 + 20);
+      const gCol = Math.min(255, (M / bandSum) * 290 + 22);
+      const bCol = Math.min(255, (L / bandSum) * 295 + 35);
+      const baseSize = 1.15 + a * 6 * sens;
+
+      const slot = this._audioGeomAllocSlot();
+      const p = ring[slot];
+      p.x3d = x3d;
+      p.y3d = y3d;
+      p.z3d = z3d;
+      p.r = rCol | 0;
+      p.g = gCol | 0;
+      p.b = bCol | 0;
+      p.size = baseSize;
+      p.born = now;
+    }
+
+    const count = this._agCount;
+    if (count < 1) return;
+
+    const head = this._agHead;
+    const rotY = now * 0.00011;
+    const rotX = now * 0.000065;
+    const cosY = Math.cos(rotY);
+    const sinY = Math.sin(rotY);
+    const cosX = Math.cos(rotX);
+    const sinX = Math.sin(rotX);
+    const scaleXY = Math.min(w, h) * 0.088;
+
+    const sxArr = this._agProjSX;
+    const syArr = this._agProjSY;
+    const zArr = this._agProjZ;
+    const aArr = this._agProjA;
+    const sArr = this._agProjSize;
+    const rArr = this._agProjR;
+    const gArr = this._agProjG;
+    const bArr = this._agProjB;
+    const idxs = this._agSortIdx;
+
+    for (let k = 0; k < count; k++) {
+      const p = ring[(head + k) % cap];
+      const ageMs = now - p.born;
+      const lifeA = ageMs >= maxAge ? 0 : 1 - ageMs / maxAge;
+
+      let rx = p.x3d * cosY - p.z3d * sinY;
+      let rz = p.x3d * sinY + p.z3d * cosY;
+      let ry = p.y3d;
+      const ry2 = ry * cosX - rz * sinX;
+      rz = ry * sinX + rz * cosX;
+      ry = ry2;
+
+      const zClamped = Math.max(-focal * 0.78, Math.min(focal * 1.45, rz));
+      const persp = focal / (focal + zClamped);
+      sxArr[k] = cx + rx * scaleXY * persp;
+      syArr[k] = cy + ry * scaleXY * persp;
+      zArr[k] = zClamped;
+      aArr[k] = lifeA;
+      sArr[k] = p.size * (0.75 + 0.45 * persp);
+      rArr[k] = p.r;
+      gArr[k] = p.g;
+      bArr[k] = p.b;
+    }
+
+    this._agRemapSoftBoundaries(sxArr, syArr, count, w, h);
+
+    for (let k = 0; k < count; k++) idxs[k] = k;
+    idxs.length = count;
+    idxs.sort((i, j) => zArr[i] - zArr[j]);
+
+    const neighMax = Math.min(this._agNeighborLookahead, count - 1);
+    const d2Thr = this._agNeighborDistSq;
+    ctx.lineWidth = 1;
+    ctx.globalCompositeOperation = "source-over";
+
+    for (let u = 0; u < count; u++) {
+      const k = idxs[u];
+      if (aArr[k] < 0.04) continue;
+      const lim = Math.min(k + neighMax, count - 1);
+      for (let j = k + 1; j <= lim; j++) {
+        const dx = sxArr[k] - sxArr[j];
+        const dy = syArr[k] - syArr[j];
+        if (dx * dx + dy * dy > d2Thr) continue;
+        const alpha = Math.min(aArr[k], aArr[j]) * 0.22;
+        if (alpha < 0.03) continue;
+        ctx.strokeStyle = `rgba(180,200,230,${alpha})`;
+        ctx.beginPath();
+        ctx.moveTo(sxArr[k], syArr[k]);
+        ctx.lineTo(sxArr[j], syArr[j]);
+        ctx.stroke();
+      }
+    }
+
+    if (this._agSequentialLines && count > 1) {
+      for (let k = 0; k < count - 1; k++) {
+        const alpha = Math.min(aArr[k], aArr[k + 1]) * 0.18;
+        if (alpha < 0.028) continue;
+        ctx.strokeStyle = `rgba(140,190,255,${alpha})`;
+        ctx.beginPath();
+        ctx.moveTo(sxArr[k], syArr[k]);
+        ctx.lineTo(sxArr[k + 1], syArr[k + 1]);
+        ctx.stroke();
+      }
+    }
+
+    for (let u = 0; u < count; u++) {
+      const k = idxs[u];
+      const alpha = aArr[k];
+      if (alpha < 0.02) continue;
+      const sz = sArr[k];
+      if (sz < 0.35) continue;
+      ctx.fillStyle = `rgba(${rArr[k]},${gArr[k]},${bArr[k]},${alpha * 0.92})`;
+      ctx.beginPath();
+      ctx.arc(sxArr[k], syArr[k], sz * 0.5, 0, Math.PI * 2);
+      ctx.fill();
+    }
+  }
+
   drawParticleFlow() {
     if (!this.canvas || !this.ctx) return;
     if (
@@ -2356,13 +3293,7 @@ class AudioVisualizer {
       // alphaBucket is an integer 0..100, representing alpha in steps of 0.01.
       // This slightly quantizes alpha but is visually indistinguishable and cuts string churn.
       const key =
-        (hueInt & 511) +
-        "|" +
-        satInt +
-        "|" +
-        lightInt +
-        "|" +
-        alphaBucket;
+        (hueInt & 511) + "|" + satInt + "|" + lightInt + "|" + alphaBucket;
       let v = hslaCache.get(key);
       if (v) return v;
       v = `hsla(${hueInt}, ${satInt}%, ${lightInt}%, ${alphaBucket * 0.01})`;
@@ -2522,6 +3453,8 @@ class AudioVisualizer {
           "frequency3x",
           "frequency4x",
           "circles",
+          "audioGeometry",
+          "painter",
         ]);
         if (visualTypeSelect) {
           const mode = allowedModes.has(savedVisualType)
@@ -2665,8 +3598,23 @@ class AudioVisualizer {
         const sensitivityValue = document.getElementById("sensitivityValue");
 
         if (visualTypeSelect) {
-          visualTypeSelect.value = preferences.visualType;
-          this.visualType = preferences.visualType;
+          const allowedModes = new Set([
+            "waveform",
+            "circular",
+            "lissajous",
+            "particleFlow",
+            "frequency2x",
+            "frequency3x",
+            "frequency4x",
+            "circles",
+            "audioGeometry",
+            "painter",
+          ]);
+          const mode = allowedModes.has(preferences.visualType)
+            ? preferences.visualType
+            : "frequency3x";
+          visualTypeSelect.value = mode;
+          this.visualType = mode;
         }
 
         if (sensitivitySlider) {

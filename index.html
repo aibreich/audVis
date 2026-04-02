@@ -1,4 +1,4 @@
-<!DOCTYPE html>
+<!doctype html>
 <html lang="en">
   <head>
     <meta charset="UTF-8" />
@@ -56,6 +56,8 @@
               <option value="frequency3x" selected>Rain Drops</option>
               <option value="frequency4x">Frequency Bars</option>
               <option value="circles">Circles</option>
+              <option value="audioGeometry">Audio Geometry</option>
+              <option value="painter">Painter (3D graph)</option>
             </select>
           </div>
 
@@ -94,6 +96,30 @@
       </div>
 
       <div class="visualizer-container">
+        <div
+          id="debugMenu"
+          class="debug-menu"
+          hidden
+          role="dialog"
+          aria-label="Debug information"
+          aria-hidden="true"
+        >
+          <div class="debug-menu-header">
+            <span class="debug-menu-title">Debug</span>
+            <button
+              type="button"
+              class="debug-menu-close"
+              aria-label="Close debug menu"
+            >
+              ×
+            </button>
+          </div>
+          <pre id="debugMenuReadout" class="debug-menu-readout"></pre>
+          <p class="debug-menu-hint">
+            <kbd class="demo-kbd">D</kbd> toggle ·
+            <kbd class="demo-kbd">Esc</kbd> close
+          </p>
+        </div>
         <canvas id="visualizer" width="1200" height="800"></canvas>
         <!-- <div class="audio-info">
           <div id="frequency">Frequency: -- Hz</div>

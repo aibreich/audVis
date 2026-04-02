@@ -18,6 +18,7 @@ A lightweight, real-time audio visualizer inspired by classic Xbox‑era visuals
   - **Rain Drops** (`frequency3x`, mirrored bars from top + raindrop overlay)
   - **Frequency Bars** (`frequency4x`, 4-quadrant center-out)
   - **Circles** (up to 64 points + trail)
+  - **Audio Geometry** (FFT-driven 3D-style point ring with links)
 - **Controls**
   - **Sensitivity** slider
   - **Hue** (global palette rotation)
@@ -100,14 +101,14 @@ audVis/
   - Microphone input
   - Desktop screen share with audio (when browser supports audio sharing)
   - Mobile “best effort” audio capture flow + UI indicator (`mobile-audio-mode`)
-  - 8 visualization modes listed in the UI
+  - 9 visualization modes listed in the UI
   - Fullscreen mode with auto-hide controls
   - Preference save/load/reset (mode, sensitivity, hue)
   - Performance-minded rendering (buffer reuse, fixed particle pool, mode-specific clearing/trails, FPS throttle)
 
 - ⚠️ **In-progress / partially implemented**
   - “System audio capture” strategies on mobile/desktop beyond `getDisplayMedia` include multiple experimental methods (constraints tricks, MediaRecorder approach, etc.). Some branches are best-effort and environment-dependent.
-  - `demo.html` content is not fully aligned with the current app UI (it mentions features that are not present in `index.html`).
+  - `demo.html` is maintained alongside `index.html`; if a mode is missing from either, treat that as a bug.
 
 - ❌ **Planned / scaffolded but not integrated**
   - **Streaming URL support** (YouTube/Spotify/Apple Music): implemented as `streaming-service.js` (platform detection + demo oscillator stream), but **not imported/used** by `index.html`/`script.js`.
